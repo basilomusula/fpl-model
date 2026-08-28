@@ -1,0 +1,19 @@
+# Rebuilt on every run
+.fpl_cache/
+output/
+_site/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Your own squad, if you would rather not commit it. Delete this line if you
+# want the scheduled GitHub Action to use it (it needs the file in the repo).
+# my_squad.json
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
