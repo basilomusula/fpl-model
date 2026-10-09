@@ -44,7 +44,20 @@ minute or two. It is cached in `.fpl_cache/`, so later runs take seconds.
 
 ## Telling it which players you own
 
-Create a JSON file (see `my_squad.example.json`):
+Three ways, any of which works:
+
+**In the dashboard.** Open the page, press *Pick my squad*, search and add
+your fifteen, set your bank and free transfers, save. It is remembered in that
+browser and the page recomputes your XI, captain, vice and transfers on the
+spot. Nothing to edit, nothing to commit.
+
+**From your FPL team ID.** Pass `--team-id 1234567` (the number in the URL
+when you view your team on the FPL site), or set the environment variable
+`FPL_TEAM_ID`, and the squad you actually saved for the last deadline is
+pulled from FPL. On GitHub, set it once as a repository variable and every
+scheduled run uses it.
+
+**A JSON file** (see `my_squad.example.json`):
 
 ```json
 {
@@ -108,6 +121,60 @@ Points over the horizon are discounted 12% per gameweek, so a good fixture next
 week counts for more than a good fixture in five weeks' time. Double gameweeks
 are summed automatically and blanks simply contribute nothing.
 
+## Choosing a formation
+
+By default the XI takes whichever legal shape projects best that week
+("auto"), so it can be 5-3-2 one week and 4-4-2 the next. The dashboard's
+formation strip lets you fix it instead:
+
+* **Viewing your squad**, picking 3-4-3 fields your fifteen in 3-4-3 every
+  week; the captain, vice, bench order and transfer suggestions all follow.
+* **Viewing the best £100m squad**, picking 3-4-3 swaps in a squad *built*
+  for 3-4-3 — the solver spends the budget on three forwards rather than five
+  defenders, and the bench is filled accordingly. *Make this my squad* adopts
+  it.
+
+Each button shows what the shape costs against auto over the planning
+horizon, and ★ marks the best single formation. Auto always comes out on top
+because it is allowed to change shape week to week; a fixed formation
+typically costs between half a point and a point and a half a week. On the
+command line, `--formation 3-4-3` does the same and prints the comparison
+table for all eight.
+
+## How accurate is it?
+
+Every claim above is checked by a **walk-forward backtest**
+(`fpl_model/backtest.py`). For each completed gameweek the model is rebuilt
+using only what was knowable before that deadline — the per-round log up to
+the previous week, the price at the time, the fixtures — and scored against
+what actually happened. Nothing from the future leaks in.
+
+Over the whole of 2025-26 (37 scorable gameweeks):
+
+| | Model | Naive season-points pick | Best possible in hindsight |
+|---|---|---|---|
+| Actual points of the chosen XI, per week | **60.5** | 51.4 | 155 |
+| Weeks the model's XI scored more | **29 of 37** | — | — |
+| Rank correlation, projected vs actual | 0.42 | — | 1.00 |
+| Captain's actual points, per week | 6.1 | 5.7 | 17.4 |
+
+So: a real edge of around nine points a week over picking on season points,
+sustained across most weeks, and a captaincy call that is only a little better
+than the obvious choice — that is where most of the remaining room is.
+
+The default settings in `ModelParams` are the ones that search found best;
+against the original hand-picked settings they are worth +3.5 points a week.
+`tools/tune.py` re-runs the search for any season, which is worth doing each
+summer. The dashboard's **"How accurate has it been?"** panel runs the same
+replay on *this* season's completed gameweeks every time the page is built,
+so you can see for yourself rather than take my word for it.
+
+Caveats, honestly stated: one season is one sample, and the replay cannot
+know who was ruled out on the Friday (the live model can), so it slightly
+understates the live model. It also cannot be compared fairly against FPL's
+own expected points, which in the public data turn out to be recorded late
+enough to know who played.
+
 ## How the selection works
 
 Choosing 15 players under a budget, two per-position quotas and a three-per-club
@@ -139,6 +206,12 @@ close to zero.
 --lock "Salah" ...      players that must be in the squad
 --ban "Haaland" ...     players to exclude entirely
 --min-availability 0.75 drop players less likely than this to be fit
+--min-minutes 0         ignore players expected to play fewer minutes per game
+--minutes-weight 1.25   how hard to penalise part-players (1.0 is neutral)
+--scorecard             replay this season's completed gameweeks, report accuracy
+--scorecard-weeks 12    how many recent gameweeks the scorecard covers
+--team-id N             pull your saved squad from FPL (or set FPL_TEAM_ID)
+--formation 3-4-3       fix the starting shape (default auto: best shape each week)
 --out output            output directory
 --refresh               ignore cached prices and injury news
 --offline               run entirely from cache
@@ -207,10 +280,10 @@ CSV files of the right shape are published at
 * **Promoted clubs and new signings lean on the price prior**, which is a much
   blunter instrument than actual data. Treat August projections for those
   players as a starting point for your own judgement.
-* **Team strength ratings are FPL's own** and they update slowly, particularly
-  in the first few weeks of a season. Before the opening weekend they are
-  often not published at all, in which case the model leans on fixture
-  difficulty and tells you it is doing so.
+* **Team strength ratings are FPL's own** and they update slowly. When they
+  are not published at all the model leans on fixture difficulty and says so
+  on the page. Measured on a full season, running without them costs about
+  one point a week — a small loss, not a broken model.
 * **The rankings table is not club-capped, and shouldn't be.** It answers "who
   are the best players", not "who can I legally own". The three-per-club rule
   applies to the squad the optimiser builds, which is a different thing.

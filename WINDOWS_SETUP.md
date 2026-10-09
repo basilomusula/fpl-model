@@ -99,8 +99,12 @@ Both open in Excel.
 ## Step 6 — Once you've entered a squad on the FPL site
 
 Tell the model what you own so it can pick your XI and suggest transfers.
+**The easiest way is in the dashboard itself**: press *Pick my squad*, add
+your fifteen, save. It is remembered in that browser. Or pass your FPL team
+number: `py run_fpl.py --team-id 1234567` (the number in the address bar when
+you view your team on the FPL site).
 
-Open `my_squad.example.json` in Notepad (right-click → Open with → Notepad),
+If you would rather keep a file, open `my_squad.example.json` in Notepad (right-click → Open with → Notepad),
 replace the fifteen names with yours, and save it **as `my_squad.json`** in the
 same folder. In Notepad's Save As dialog, set *Save as type* to **All Files**,
 otherwise it will silently append `.txt`.
@@ -210,6 +214,10 @@ py run_fpl.py --horizon 8                  # plan eight gameweeks ahead
 py run_fpl.py --budget 101.5               # a squad worth more than £100m
 py run_fpl.py --lock "M.Salah" "Haaland"   # build around players you keep
 py run_fpl.py --ban "Haaland"              # exclude someone entirely
+py run_fpl.py --formation 3-4-3            # best squad and XI in a fixed shape
+py run_fpl.py --min-minutes 60             # nailed-on starters only
+py run_fpl.py --scorecard                  # how accurate has it been this season
+py run_fpl.py --team-id 1234567            # pull your real squad from FPL
 py run_fpl.py --top-only 250               # faster, slightly cruder
 py run_fpl.py --site _site                 # installable web-app copy
 py run_fpl.py --help                       # every option

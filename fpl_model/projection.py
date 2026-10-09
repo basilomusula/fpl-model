@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .features import Season, expected_conceded_penalty
+from .features import DEFAULT_PARAMS, ModelParams, Season, expected_conceded_penalty
 
 ATT_ELASTICITY = 0.90       # attacking returns vs team expected goals
 CS_ELASTICITY = 1.00        # clean-sheet points vs shutout probability
@@ -29,14 +29,26 @@ ATT_MULT_BOUNDS = (0.55, 1.70)
 CS_MULT_BOUNDS = (0.30, 2.30)
 HORIZON_DECAY = 0.88        # a point in GW+4 is worth less than one in GW+1
 
+# Expected minutes enter as (xmins/90) ** MINUTES_EXPONENT. At 1.0 the model
+# is neutral - half the minutes, half the points. Above 1.0 it leans toward
+# nailed-on starters: a full 90 is unchanged (1**k == 1) while part-players
+# are marked down, so raising this penalises rotation risk without inflating
+# anyone's projection.
+MINUTES_EXPONENT = 1.25
 
-def project(season: Season, horizon: int = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
+
+def project(season: Season, horizon: int = 5,
+            minutes_exponent: float | None = None,
+            params: ModelParams = DEFAULT_PARAMS
+            ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return (per-gameweek projections, per-player summary).
 
     The per-gameweek frame has one row per player per fixture, so a double
     gameweek naturally produces two rows and a blank produces none.
     """
     players, fixtures = season.players, season.fixtures
+    if minutes_exponent is None:
+        minutes_exponent = params.minutes_exponent
     if fixtures.empty:
         raise ValueError("no upcoming fixtures found - is the season over?")
 
@@ -45,9 +57,9 @@ def project(season: Season, horizon: int = 5) -> tuple[pd.DataFrame, pd.DataFram
     league_pcs = float(fixtures.p_clean_sheet.mean())
 
     fx = fixtures.copy()
-    fx["att_mult"] = np.clip((fx.xg_for / league_xg) ** ATT_ELASTICITY,
+    fx["att_mult"] = np.clip((fx.xg_for / league_xg) ** params.att_elasticity,
                              *ATT_MULT_BOUNDS)
-    fx["cs_mult"] = np.clip((fx.p_clean_sheet / league_pcs) ** CS_ELASTICITY,
+    fx["cs_mult"] = np.clip((fx.p_clean_sheet / league_pcs) ** params.cs_elasticity,
                             *CS_MULT_BOUNDS)
     fx["conceded_delta"] = (fx.xg_against.map(expected_conceded_penalty)
                             - expected_conceded_penalty(league_xga))
@@ -56,7 +68,8 @@ def project(season: Season, horizon: int = 5) -> tuple[pd.DataFrame, pd.DataFram
             "base_p90", "xmins", "p60", "p_app", "p_start", "availability",
             "att_share", "cs_share", "neutral_share", "news", "status",
             "selected_by_percent", "has_history", "curr_minutes",
-            "hist_minutes", "form", "total_points"]
+            "curr_points", "hist_minutes", "hist_points", "recent_start_rate",
+            "recent_ppg", "form", "total_points"]
     p = players[[c for c in cols if c in players.columns]].copy()
 
     merged = p.merge(fx, on="team", how="inner", suffixes=("", "_fx"))
@@ -64,7 +77,8 @@ def project(season: Season, horizon: int = 5) -> tuple[pd.DataFrame, pd.DataFram
     fixture_factor = (merged.att_share * merged.att_mult
                       + merged.cs_share * merged.cs_mult
                       + merged.neutral_share)
-    ep = merged.base_p90 * fixture_factor * (merged.xmins / 90.0)
+    minutes_factor = (merged.xmins / 90.0).clip(0, 1) ** minutes_exponent
+    ep = merged.base_p90 * fixture_factor * minutes_factor
 
     # Goals-conceded deductions only exist for goalkeepers and defenders and
     # only while they are on the pitch.
@@ -139,7 +153,7 @@ def _summarise(players: pd.DataFrame, per_gw: pd.DataFrame,
     for pid, grp in per_gw[per_gw.gw.isin(gws)].groupby("id"):
         parts, items = [], []
         for _, r in grp.sort_values("gw").iterrows():
-            tag = r.opp_short.upper() if r.is_home else r.opp_short.lower()
+            tag = ("" if r.is_home else "@") + r.opp_short.upper()
             parts.append(f"{tag}({'H' if r.is_home else 'A'},{r.fdr})")
             items.append({"gw": int(r.gw), "opp": str(r.opp_short),
                           "home": bool(r.is_home), "fdr": int(r.fdr),

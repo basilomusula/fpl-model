@@ -1,4 +1,4 @@
 requests>=2.28
 pandas>=1.5
 numpy>=1.23
-pulp>=2.7
+pulp>=2.7,<4

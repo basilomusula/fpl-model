@@ -148,6 +148,158 @@ def main(cache: str) -> int:
     check("a weak squad has an upgrade worth making",
           bool(weak_tr) and weak_tr[0]["net_gain"] > 1.0)
 
+    print("\nminutes weighting and rotation filter")
+    from fpl_model.projection import MINUTES_EXPONENT as _MX
+    _, flat = project(season, horizon=5, minutes_exponent=1.0)
+    _, steep = project(season, horizon=5, minutes_exponent=1.6)
+    fi = flat.set_index("id").sort_index(); si = steep.set_index("id").sort_index()
+    f, s = fi.ep_horizon, si.ep_horizon
+    nailed = fi.xmins >= 85
+    partial = (fi.xmins > 10) & (fi.xmins <= 45)
+    check("default weighting favours starters", _MX > 1.0, str(_MX))
+    check("a full 90 is unaffected by the weighting",
+          bool(np.allclose(f[nailed & (f > 0)], s[nailed & (f > 0)], rtol=0.06)))
+    check("part-players are marked down harder",
+          float(s[partial].sum()) < float(f[partial].sum()))
+    check("the weighting never inflates anyone", bool((s <= f + 1e-6).all()))
+    filtered = optimise_squad(summary, budget=100.0, min_minutes=60, verbose=False)["squad"]
+    check("rotation filter keeps a legal squad", len(filtered) == 15)
+    check("rotation filter excludes low-minute players",
+          float(ix.loc[filtered].xmins.min()) >= 60)
+    check("actual minutes are available to report",
+          "curr_minutes" in summary.columns and not summary.curr_minutes.isna().any())
+    check("start rate is a probability", bool(summary.p_start.between(0, 1).all()))
+
+    print("\ncaptain and vice")
+    rel = {p_: 0.5 if i == 1 else 1.0 for i, p_ in enumerate(squad)}
+    line_rel = best_xi_for_gw(squad, pos, ep_now, reliability=rel)
+    check("captain unchanged by reliability weighting", line_rel.captain == line.captain)
+    check("vice is in the XI and not the captain",
+          line_rel.vice_captain in line_rel.xi and line_rel.vice_captain != line_rel.captain)
+    ep_rig = dict(ep_now)
+    others = [p_ for p_ in line.xi if p_ != line.captain]
+    top2 = sorted(others, key=lambda p_: ep_now[p_], reverse=True)[:2]
+    rel2 = {p_: 1.0 for p_ in squad}; rel2[top2[0]] = 0.4   # second-best is a doubt
+    line2 = best_xi_for_gw(squad, pos, ep_rig, reliability=rel2)
+    check("a doubtful second-best is passed over for vice",
+          line2.vice_captain != top2[0], f"vice {line2.vice_captain} vs doubt {top2[0]}")
+
+    print("\nformations")
+    from fpl_model.optimiser import fmt_formation, parse_formation
+    check("parses '3-4-3'", parse_formation("3-4-3") == (3, 4, 3))
+    check("'auto' means no constraint", parse_formation("auto") is None)
+    try:
+        parse_formation("2-5-3"); bad_ok = False
+    except ValueError:
+        bad_ok = True
+    check("rejects an illegal shape", bad_ok)
+
+    auto_h = squad_horizon_points(squad, pos, gw_ep, gws)
+    for shp in FORMATIONS:
+        name = fmt_formation(shp)
+        built = optimise_squad(summary, budget=100.0, formation=shp, verbose=False)
+        sq = built["squad"]
+        counts_f = ix.loc[sq].pos.value_counts().to_dict()
+        line_f = best_xi_for_gw(sq, pos, {p_: gw_ep.get(p_, {}).get(gws[0], 0.0) for p_ in sq},
+                                formation=shp)
+        xi_shape = tuple(sum(1 for p_ in line_f.xi if pos[p_] == k) for k in ("DEF", "MID", "FWD"))
+        h = squad_horizon_points(sq, pos, gw_ep, gws, formation=shp)
+        ok = (len(sq) == 15 and counts_f == SQUAD_LIMITS and built["cost"] <= 100.0 + 1e-6
+              and int(ix.loc[sq].team.value_counts().max()) <= 3 and xi_shape == shp
+              and line_f.formation == name
+              and h <= squad_horizon_points(sq, pos, gw_ep, gws) + 1e-6)
+        check(f"{name}: legal squad, XI in shape, never beats its own auto", ok,
+              f"xi {xi_shape} cost {built['cost']} h {h:.1f} vs auto {auto_h:.1f}")
+
+    # Forcing a shape on any squad never beats letting it choose.
+    for shp in FORMATIONS:
+        ep_any = {p_: gw_ep.get(p_, {}).get(gws[0], 0.0) for p_ in squad}
+        if best_xi_for_gw(squad, pos, ep_any, formation=shp).xi_points > line.xi_points + 1e-9:
+            check(f"fixed {fmt_formation(shp)} cannot beat auto on one week", False)
+            break
+    else:
+        check("a fixed shape never outscores auto for the same squad", True)
+
+    tr_f, base_f, _ = suggest_transfers(squad, summary, gw_ep, gws, bank=2.0,
+                                        free_transfers=1, top_n=6, formation=(3, 4, 3))
+    check("transfer search respects a fixed shape",
+          abs(base_f - squad_horizon_points(squad, pos, gw_ep, gws, formation=(3, 4, 3))) < 1e-6)
+
+    print("\nfixture difficulty ticker")
+    from fpl_model.cli import build_ticker
+    tick = build_ticker(season, gws)
+    check("one row per club", len(tick["rows"]) == 20)
+    check("easiest run listed first",
+          all(a["avg"] <= b["avg"] for a, b in zip(tick["rows"], tick["rows"][1:])))
+    check("a club never plays itself",
+          all(c["opp"] != r["club"] for r in tick["rows"] for cs in r["cells"].values() for c in cs))
+
+    print("\nbacktest harness")
+    import os
+    from fpl_model.backtest import GameweekLog, evaluate_gameweek, run_backtest, summarise
+    from fpl_model.features import ModelParams
+
+    hist_dir = os.environ.get("FPL_HIST_DIR", "/home/claude/fpl/hist")
+    prior_dir = os.environ.get("FPL_PRIOR_DIR", "/home/claude/fpl/testdata")
+    have_hist = all(os.path.exists(os.path.join(hist_dir, f))
+                    for f in ("merged_gw.csv", "players_raw.csv", "teams.csv", "fixtures.csv"))
+    if not have_hist:
+        print("  SKIP  (no per-gameweek history CSVs at FPL_HIST_DIR)")
+    else:
+        log = GameweekLog.from_csvs(
+            os.path.join(hist_dir, "merged_gw.csv"), os.path.join(hist_dir, "players_raw.csv"),
+            os.path.join(hist_dir, "teams.csv"), os.path.join(hist_dir, "fixtures.csv"),
+            {k: os.path.join(prior_dir, v) for k, v in
+             (("2024/25", "players_2024-25.csv"), ("2023/24", "players_2023-24.csv"))
+             if os.path.exists(os.path.join(prior_dir, v))})
+        check("history covers a full season", log.rounds[-1] >= 30, str(log.rounds[-1]))
+
+        # No leakage: the as-of state must equal the sum of earlier rounds only.
+        g = 12
+        boot, summ, fxs, act = log.as_of(g)
+        el = pd.DataFrame(boot["elements"]).set_index("id")
+        rows = log.rows
+        pid = int(rows[rows["round"] < g].groupby("id").minutes.sum().idxmax())
+        expect = float(rows[(rows.id == pid) & (rows["round"] < g)].total_points.sum())
+        check("as-of totals exclude the target gameweek and after",
+              abs(float(el.loc[pid, "total_points"]) - expect) < 1e-6,
+              f"{el.loc[pid, 'total_points']} vs {expect}")
+        check("as-of history log stops before the gameweek",
+              all(int(h["round"]) < g for h in summ[pid]["history"]))
+        check("fixtures at or after the gameweek are unplayed",
+              all(not f["finished"] for f in fxs if f.get("event") and f["event"] >= g))
+        check("actuals come from the target gameweek only",
+              abs(float(act[act.id == pid].actual.iloc[0])
+                  - float(rows[(rows.id == pid) & (rows["round"] == g)].total_points.sum())) < 1e-6)
+
+        m, df = evaluate_gameweek(log, g)
+        check("one-week metrics are finite",
+              all(np.isfinite(m[k]) for k in ("mae", "spearman", "xi_model", "xi_naive")))
+        check("model XI is inside the oracle ceiling",
+              m["xi_model"] <= m["xi_oracle"] + 1e-9)
+        check("captain pick never beats the best possible",
+              m["captain_model"] <= m["captain_best"] + 1e-9)
+
+        # Regression guard: the shipped defaults must beat the naive season
+        # points pick on the full past season. If a model change breaks this,
+        # the change is making it worse at the thing it is for.
+        res = run_backtest(log)
+        s = summarise(res)
+        check("defaults beat the naive pick over a season",
+              s["xi_model_mean"] > s["xi_naive_mean"] + 2.0,
+              f"{s['xi_model_mean']:.2f} vs {s['xi_naive_mean']:.2f}")
+        check("defaults beat naive in most weeks",
+              s["beats_naive_weeks"] >= 0.6 * s["gameweeks"],
+              f"{s['beats_naive_weeks']}/{s['gameweeks']}")
+        check("projections are not badly biased",
+              abs(s["bias"]) < 0.5, f"bias {s['bias']:+.3f}")
+        untuned = ModelParams(shrink_k=8.0, recent_weight=0.0, form_window=4,
+                              att_elasticity=0.9, cs_elasticity=1.0, xg_weight=0.0)
+        s0 = summarise(run_backtest(log, params=untuned))
+        check("tuned defaults outscore the original settings",
+              s["xi_model_mean"] >= s0["xi_model_mean"] - 1e-9,
+              f"{s['xi_model_mean']:.2f} vs {s0['xi_model_mean']:.2f}")
+
     print("\ndegraded team strength ratings")
     # Regression: FPL ships the attack/defence ratings as zeros until it has
     # set the season's numbers. Dividing by that produced NaN everywhere,

@@ -2,8 +2,9 @@
 #
 # Set-up, once:
 #   1. Settings -> Pages -> Build and deployment -> Source: "GitHub Actions"
-#   2. Commit a my_squad.json in the repo root (optional - without one this
-#      builds the best £100m squad from scratch instead)
+#   2. Either set a repository variable FPL_TEAM_ID (your team's number from
+#      the FPL site URL) so each run pulls your real squad, or commit a
+#      my_squad.json - or neither, and pick your squad in the page itself
 #   3. Actions tab -> "FPL dashboard" -> Run workflow, to test it now
 #
 # No secrets, no API keys, no server. The FPL API is public.
@@ -51,15 +52,22 @@ jobs:
           restore-keys: |
             fpl-cache-
 
+      # Set FPL_TEAM_ID once (Settings -> Secrets and variables -> Actions ->
+      # Variables) and every run pulls your actual squad from FPL - no file
+      # to edit. my_squad.json still works as a fallback.
       - name: Build the dashboard
+        env:
+          FPL_TEAM_ID: ${{ vars.FPL_TEAM_ID }}
         run: |
-          if [ -f my_squad.json ]; then
-            echo "Using my_squad.json"
-            python run_fpl.py --squad my_squad.json --site _site --refresh
-          else
-            echo "No my_squad.json found - building an optimal squad instead"
-            python run_fpl.py --site _site --refresh
+          ARGS="--site _site --refresh --scorecard"
+          if [ -n "$FPL_TEAM_ID" ]; then
+            echo "Using FPL team id $FPL_TEAM_ID"
           fi
+          if [ -f my_squad.json ]; then
+            echo "my_squad.json present (used if the team id is unset or unavailable)"
+            ARGS="$ARGS --squad my_squad.json"
+          fi
+          python run_fpl.py $ARGS
 
       - name: Check something was actually produced
         run: |

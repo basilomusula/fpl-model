@@ -101,18 +101,18 @@ window to authenticate the first time.
 Note that `.gitignore` keeps `.fpl_cache/` and `output/` out of the repo —
 those are rebuilt on every run and would only add noise.
 
-## Step 4 — Add your squad
+## Step 4 — Tell it which squad is yours
 
-Make sure `my_squad.json` exists in the folder and is committed:
+The easiest way needs no file at all. On your repository: **Settings →
+Secrets and variables → Actions → Variables → New repository variable**.
+Name: `FPL_TEAM_ID`. Value: the number in the address bar when you view your
+team on fantasy.premierleague.com (for example `.../entry/1234567/...`).
+Every scheduled run then pulls the squad you actually saved for the last
+deadline.
 
-```powershell
-git add my_squad.json
-git commit -m "My squad"
-git push
-```
-
-Without it, the scheduled run builds an optimal squad from scratch instead —
-still useful, but you lose the transfer suggestions.
+Alternatively, once the page is live you can press **Pick my squad** in the
+dashboard itself and build your fifteen there; it is remembered in that
+browser. Or commit a `my_squad.json` as before. Any of the three works.
 
 ## Step 5 — Turn on Pages
 
@@ -149,18 +149,28 @@ browser chrome, and it works offline from the last version you loaded.
 It rebuilds itself at 08:30 East Africa time daily, and again on Friday
 afternoons before the deadline. You do nothing.
 
-**When you make transfers**, update your squad so the model keeps up:
+**When you make transfers**, nothing to do if you set `FPL_TEAM_ID` — the next
+run picks them up from FPL. If you use the in-page picker, press *Pick my
+squad* again and adjust. Only the JSON route needs a commit.
+
+## Updating the code
+
+When there is a new version of the model, you have two routes.
+
+**Without the command line:** on your repository, **Add file → Upload
+files**, then drag the *contents* of the new `fpl-model` folder (not the
+folder itself) onto the page — Chrome keeps the sub-folders. Commit changes.
+Existing files are replaced.
+
+**With git**, from the folder after extracting the new zip over it:
 
 ```powershell
-cd "$env:USERPROFILE\Downloads\fpl-model"
-# edit my_squad.json in Notepad
-git add my_squad.json
-git commit -m "Transfers for GW5"
+git add .
+git commit -m "Update model"
 git push
 ```
 
-The push triggers nothing on its own — wait for the next scheduled run, or hit
-**Run workflow** to see it immediately.
+Either way, **Actions → FPL dashboard → Run workflow** publishes it.
 
 **Remember to drop `free_transfers` to 1** in `my_squad.json` after the first
 deadline. Unlimited changes only apply before the season starts.

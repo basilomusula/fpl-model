@@ -49,6 +49,38 @@ REPLACEMENT_P90 = {"GK": 2.6, "DEF": 2.6, "MID": 2.6, "FWD": 2.6}
 
 
 @dataclass
+class ModelParams:
+    """Every tunable assumption in one place.
+
+    Defaults are the values a walk-forward backtest over the whole of the
+    2025-26 season found best (see fpl_model.backtest and README). Against
+    the original settings they lifted the model's XI from 57.0 to 60.5
+    actual points per week and its win rate over a naive season-points pick
+    from 27 to 29 weeks out of 37. Each field is documented where it is used.
+    """
+    shrink_k: float = 20.0           # matches of prior evidence a rate is shrunk toward
+    curr_saturation: float = 900.0   # minutes until this season outweighs last
+    form_weight: float = 0.35        # max weight on recent form in the base rate
+    form_ramp_gws: float = 6.0       # gameweeks until form reaches full weight
+    form_window: int = 3             # gameweeks averaged for form
+    recent_window: int = 3           # gameweeks in the recent start-rate
+    recent_weight: float = 0.30      # weight on recent start-rate vs season rate
+    minutes_exponent: float = 1.25   # (xmins/90) ** this scales points
+    fdr_blend: float | None = None   # None: chosen from strength-rating quality
+    att_elasticity: float = 1.20     # attacking returns vs team expected goals
+    cs_elasticity: float = 1.30      # clean-sheet points vs shutout probability
+    season_weights: tuple = (1.0, 0.5, 0.2)  # prior seasons, most recent first
+    xg_weight: float = 0.25          # 0: actual goals/assists; 1: expected ones
+
+    def replace(self, **kw) -> "ModelParams":
+        from dataclasses import replace as _r
+        return _r(self, **kw)
+
+
+DEFAULT_PARAMS = ModelParams()
+
+
+@dataclass
 class Season:
     """Everything the projection model reads from."""
     players: pd.DataFrame
@@ -156,9 +188,12 @@ def _fdr_multiplier(fdr: float) -> float:
 
 
 def build_fixtures(fixtures_json: list[dict], teams: pd.DataFrame,
-                   next_gw: int, horizon: int) -> pd.DataFrame:
+                   next_gw: int, horizon: int,
+                   params: ModelParams = DEFAULT_PARAMS) -> pd.DataFrame:
     """One row per team per upcoming fixture, with expected goals both ways."""
     fdr_blend = float(teams.attrs.get("fdr_blend", FDR_BLEND))
+    if params.fdr_blend is not None:
+        fdr_blend = float(np.clip(params.fdr_blend, 0.0, 1.0))
     rows = []
     last_gw = next_gw + horizon - 1
     for fx in fixtures_json:
@@ -220,16 +255,48 @@ def expected_conceded_penalty(xga: float) -> float:
 # players
 # ---------------------------------------------------------------------- #
 
-def _season_weight(season_name: str, seasons_sorted: list[str]) -> float:
+def _season_weight(season_name: str, seasons_sorted: list[str],
+                   weights: tuple = (1.0, 0.5, 0.2)) -> float:
     """Most recent prior season counts fully, the one before it half."""
     try:
         idx = seasons_sorted.index(season_name)
     except ValueError:
         return 0.0
-    return [1.0, 0.5, 0.2][idx] if idx < 3 else 0.0
+    return weights[idx] if idx < len(weights) else 0.0
 
 
-def _history_totals(summary: dict) -> dict:
+def _recent(summary: dict, window: int) -> dict:
+    """What the player did in the last few gameweeks, from the per-round log.
+
+    Returns start rate and mean points over at most `window` rounds, or an
+    empty dict when there is no log (pre-season, or history not fetched).
+    """
+    hist = summary.get("history", []) or []
+    rows = [h for h in hist if h.get("round") is not None]
+    if not rows:
+        return {}
+    rows.sort(key=lambda h: (int(h["round"]), str(h.get("kickoff_time", ""))))
+    # Collapse double gameweeks to one entry per round.
+    by_round: dict[int, dict] = {}
+    for h in rows:
+        r = int(h["round"])
+        cur = by_round.setdefault(r, {"minutes": 0.0, "points": 0.0, "starts": 0})
+        cur["minutes"] += float(h.get("minutes") or 0)
+        cur["points"] += float(h.get("total_points") or 0)
+        s = h.get("starts")
+        cur["starts"] += int(s) if s is not None else int(float(h.get("minutes") or 0) >= 60)
+    last = [by_round[r] for r in sorted(by_round)[-window:]]
+    if not last:
+        return {}
+    return {
+        "rounds": len(last),
+        "start_rate": sum(1 for r in last if r["starts"] > 0) / len(last),
+        "points_per_round": sum(r["points"] for r in last) / len(last),
+        "minutes_per_round": sum(r["minutes"] for r in last) / len(last),
+    }
+
+
+def _history_totals(summary: dict, weights: tuple = (1.0, 0.5, 0.2)) -> dict:
     """Weighted sum of a player's previous Premier League seasons."""
     past = summary.get("history_past", []) or []
     past = [s for s in past if s.get("minutes", 0) > 0]
@@ -243,7 +310,7 @@ def _history_totals(summary: dict) -> dict:
     agg = {f: 0.0 for f in fields}
     agg["weight"] = 0.0
     for s in past:
-        w = _season_weight(s["season_name"], names)
+        w = _season_weight(s["season_name"], names, weights)
         if w <= 0:
             continue
         agg["weight"] += w
@@ -341,8 +408,10 @@ def _availability(row: pd.Series) -> tuple[float, str]:
 
 
 def build_players(bootstrap: dict, summaries: dict[int, dict],
-                  teams: pd.DataFrame, gws_played: int) -> pd.DataFrame:
+                  teams: pd.DataFrame, gws_played: int,
+                  params: ModelParams = DEFAULT_PARAMS) -> pd.DataFrame:
     """One row per player with a per-90 rate, minutes model and points split."""
+    P = params
     el = pd.DataFrame(bootstrap["elements"])
     el["pos"] = el.element_type.map(POS_NAME)
     el["price"] = el.now_cost / 10.0
@@ -364,13 +433,15 @@ def build_players(bootstrap: dict, summaries: dict[int, dict],
         pid = int(row.id)
         pos = row.pos
         curr = _current_totals(row)
-        hist = _history_totals(summaries.get(pid, {}))
+        summ = summaries.get(pid, {})
+        hist = _history_totals(summ, P.season_weights)
+        recent = _recent(summ, max(P.recent_window, P.form_window))
 
         # --- how much do we trust this season vs last? ------------------
         # Current-season evidence takes over gradually; ~10 full matches of
         # minutes and it dominates.
         curr_min = curr["minutes"]
-        w_curr = float(np.clip(curr_min / 900.0, 0.0, 1.0))
+        w_curr = float(np.clip(curr_min / P.curr_saturation, 0.0, 1.0))
         has_hist = bool(hist) and hist.get("minutes", 0) > 0
         if not has_hist:
             w_curr = 1.0 if curr_min > 0 else 0.0
@@ -383,19 +454,35 @@ def build_players(bootstrap: dict, summaries: dict[int, dict],
         blended_minutes = blend("minutes")
         blended_points = blend("total_points")
 
+        # Regression to the mean: a striker on 6 goals from 2.5 xG is due to
+        # cool off, one on 2 from 5.0 to heat up. Swap part of the attacking
+        # points actually banked for the points the chances were worth.
+        if P.xg_weight > 0:
+            xg, xa = blend("expected_goals"), blend("expected_assists")
+            if xg > 0 or xa > 0:
+                banked = blend("goals_scored") * GOAL_POINTS[pos] + blend("assists") * 3.0
+                worth = xg * GOAL_POINTS[pos] + xa * 3.0
+                blended_points += P.xg_weight * (worth - banked)
+
         # --- raw scoring rate, shrunk toward replacement level -----------
         n90 = blended_minutes / 90.0
         prior = REPLACEMENT_P90[pos]
-        k = 8.0  # equivalent to 8 full matches of prior evidence
+        k = P.shrink_k  # matches of prior evidence the rate is shrunk toward
         raw_p90 = (blended_points / n90) if n90 > 0 else prior
         base_p90 = (n90 * raw_p90 + k * prior) / (n90 + k)
 
         # --- recent form nudge ------------------------------------------
-        try:
-            form = float(row.get("form") or 0)
-        except (TypeError, ValueError):
-            form = 0.0
-        form_weight = float(np.clip(gws_played / 6.0, 0.0, 1.0)) * 0.35
+        # Prefer our own average over the per-round log (so the definition is
+        # the same live and in the backtest); fall back to FPL's form figure.
+        form = 0.0
+        if recent.get("rounds", 0) >= 2:
+            form = float(recent["points_per_round"])
+        else:
+            try:
+                form = float(row.get("form") or 0)
+            except (TypeError, ValueError):
+                form = 0.0
+        form_weight = float(np.clip(gws_played / P.form_ramp_gws, 0.0, 1.0)) * P.form_weight
         if gws_played > 0 and form > 0:
             base_p90 = (1 - form_weight) * base_p90 + form_weight * form
 
@@ -405,6 +492,10 @@ def build_players(bootstrap: dict, summaries: dict[int, dict],
         starts_rate_c = curr["starts"] / games_ref
         starts_rate_h = hist.get("starts", 0.0) / 38.0 if has_hist else 0.0
         p_start = w_curr * starts_rate_c + (1 - w_curr) * starts_rate_h
+        # A player who has stopped starting lately is less likely to start
+        # next week than his season-long rate implies, and vice versa.
+        if P.recent_weight > 0 and recent.get("rounds", 0) >= 2:
+            p_start = (1 - P.recent_weight) * p_start + P.recent_weight * recent["start_rate"]
         p_start = float(np.clip(p_start, 0.0, 0.97))
 
         mins_per_start = 78.0
@@ -437,6 +528,8 @@ def build_players(bootstrap: dict, summaries: dict[int, dict],
             "curr_minutes": curr_min, "curr_points": curr["total_points"],
             "w_curr": w_curr,
             "has_history": has_hist,
+            "recent_start_rate": recent.get("start_rate", np.nan),
+            "recent_ppg": recent.get("points_per_round", np.nan),
         })
 
     feats = pd.DataFrame(records).set_index("id")

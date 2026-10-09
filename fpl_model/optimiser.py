@@ -32,6 +32,26 @@ FORMATIONS = [(d, m, f)
               if d + m + f == 10]
 
 
+def parse_formation(value) -> tuple[int, int, int] | None:
+    """'3-4-3' or (3, 4, 3) -> (3, 4, 3); 'auto' or None -> None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value.strip().lower() in ("", "auto"):
+            return None
+        parts = tuple(int(x) for x in value.replace(" ", "").split("-"))
+    else:
+        parts = tuple(int(x) for x in value)
+    if parts not in FORMATIONS:
+        raise ValueError(f"{value!r} is not a legal FPL formation; choose from "
+                         + ", ".join(fmt_formation(f) for f in FORMATIONS))
+    return parts
+
+
+def fmt_formation(shape) -> str:
+    return "auto" if shape is None else "-".join(str(x) for x in shape)
+
+
 @dataclass
 class Lineup:
     xi: list[int]
@@ -44,8 +64,18 @@ class Lineup:
 
 
 def best_xi_for_gw(squad_ids: list[int], pos: dict[int, str],
-                   ep: dict[int, float]) -> Lineup:
-    """Highest-scoring legal XI from a 15, plus a sensible bench order."""
+                   ep: dict[int, float],
+                   reliability: dict[int, float] | None = None,
+                   formation: tuple[int, int, int] | None = None) -> Lineup:
+    """Highest-scoring legal XI from a 15, plus a sensible bench order.
+
+    The captain is simply the highest projection. The vice-captain is not
+    the second-highest: the armband only passes to him if the captain does
+    not play at all, so what matters is his projection weighted by how
+    certain he is to feature. Pass each player's probability of appearing
+    as `reliability` to get that behaviour; without it the vice falls back
+    to second-best.
+    """
     by_pos: dict[str, list[int]] = {"GK": [], "DEF": [], "MID": [], "FWD": []}
     for pid in squad_ids:
         by_pos.setdefault(pos[pid], []).append(pid)
@@ -59,7 +89,8 @@ def best_xi_for_gw(squad_ids: list[int], pos: dict[int, str],
     bench_gk = by_pos["GK"][1] if len(by_pos["GK"]) > 1 else None
 
     best, best_total, best_shape = None, -1e9, None
-    for d, m, f in FORMATIONS:
+    shapes = [formation] if formation else FORMATIONS
+    for d, m, f in shapes:
         if len(by_pos["DEF"]) < d or len(by_pos["MID"]) < m or len(by_pos["FWD"]) < f:
             continue
         picked = (by_pos["DEF"][:d] + by_pos["MID"][:m] + by_pos["FWD"][:f])
@@ -76,7 +107,17 @@ def best_xi_for_gw(squad_ids: list[int], pos: dict[int, str],
 
     xi_sorted = sorted(xi, key=lambda p: ep.get(p, 0.0), reverse=True)
     captain = xi_sorted[0] if xi_sorted else None
-    vice = xi_sorted[1] if len(xi_sorted) > 1 else None
+    rel = reliability or {}
+    others = [p for p in xi if p != captain]
+    if others and rel:
+        # Reliability squared: a 70%-to-play player's projection is cut to
+        # half for this purpose, a 97% one barely touched. The vice is an
+        # insurance policy, and insurance should not itself be a gamble.
+        vice = max(others, key=lambda p: ep.get(p, 0.0) * rel.get(p, 1.0) ** 2)
+    else:
+        vice = others[0] if others else None
+        if others:
+            vice = max(others, key=lambda p: ep.get(p, 0.0))
 
     return Lineup(xi=xi, bench=bench, bench_gk=bench_gk,
                   formation="-".join(str(x) for x in best_shape),
@@ -85,12 +126,13 @@ def best_xi_for_gw(squad_ids: list[int], pos: dict[int, str],
 
 def squad_horizon_points(squad_ids: list[int], pos: dict[int, str],
                          gw_ep: dict[int, dict[int, float]], gws: list[int],
-                         decay: float = 0.88, captain: bool = True) -> float:
+                         decay: float = 0.88, captain: bool = True,
+                         formation: tuple[int, int, int] | None = None) -> float:
     """Sum of the best XI's points over the horizon, captaincy included."""
     total = 0.0
     for i, gw in enumerate(gws):
         ep = {pid: gw_ep.get(pid, {}).get(gw, 0.0) for pid in squad_ids}
-        line = best_xi_for_gw(squad_ids, pos, ep)
+        line = best_xi_for_gw(squad_ids, pos, ep, formation=formation)
         pts = line.xi_points
         if captain and line.captain is not None:
             pts += ep.get(line.captain, 0.0)
@@ -104,10 +146,12 @@ def squad_horizon_points(squad_ids: list[int], pos: dict[int, str],
 
 def optimise_squad(summary: pd.DataFrame, budget: float = 100.0,
                    min_availability: float = 0.75,
+                   min_minutes: float = 0.0,
                    min_price_pool: float | None = None,
                    locked: list[int] | None = None,
                    banned: list[int] | None = None,
                    bench_weight: float = BENCH_WEIGHT,
+                   formation: tuple[int, int, int] | None = None,
                    verbose: bool = True) -> dict:
     """Best legal 15 under the budget, chosen for the XI it produces.
 
@@ -128,6 +172,7 @@ def optimise_squad(summary: pd.DataFrame, budget: float = 100.0,
     keep = pool.id.isin(locked)
     ok = (~pool.id.isin(banned)
           & ((pool.availability >= min_availability) | keep)
+          & ((pool.xmins >= min_minutes) | keep)
           & ((pool.ep_horizon > 0) | keep))
     if min_price_pool:
         ok &= (pool.price >= min_price_pool) | keep
@@ -144,9 +189,10 @@ def optimise_squad(summary: pd.DataFrame, budget: float = 100.0,
     club = dict(zip(pool.id, pool.team))
 
     prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
-    x = pulp.LpVariable.dicts("pick", ids, cat="Binary")     # in the 15
-    y = pulp.LpVariable.dicts("start", ids, cat="Binary")    # in the XI
-    c = pulp.LpVariable.dicts("capt", ids, cat="Binary")     # armband
+    # Built by hand rather than LpVariable.dicts, which PuLP 4 removed.
+    x = {i: pulp.LpVariable(f"pick_{i}", cat="Binary") for i in ids}   # in the 15
+    y = {i: pulp.LpVariable(f"start_{i}", cat="Binary") for i in ids}  # in the XI
+    c = {i: pulp.LpVariable(f"capt_{i}", cat="Binary") for i in ids}   # armband
 
     prob += (
         pulp.lpSum(ep_h[i] * y[i] for i in ids)
@@ -166,12 +212,19 @@ def optimise_squad(summary: pd.DataFrame, budget: float = 100.0,
     prob += pulp.lpSum(y[i] for i in ids) == 11
     prob += pulp.lpSum(c[i] for i in ids) == 1
     prob += pulp.lpSum(y[i] for i in ids if pos[i] == "GK") == 1
-    prob += pulp.lpSum(y[i] for i in ids if pos[i] == "DEF") >= 3
-    prob += pulp.lpSum(y[i] for i in ids if pos[i] == "DEF") <= 5
-    prob += pulp.lpSum(y[i] for i in ids if pos[i] == "MID") >= 2
-    prob += pulp.lpSum(y[i] for i in ids if pos[i] == "MID") <= 5
-    prob += pulp.lpSum(y[i] for i in ids if pos[i] == "FWD") >= 1
-    prob += pulp.lpSum(y[i] for i in ids if pos[i] == "FWD") <= 3
+    if formation:
+        # A chosen shape: the XI is exactly this many of each, and the
+        # budget is spent with that XI in mind - money goes to the three
+        # forwards of a 3-4-3, not the five defenders of a 5-3-2.
+        for p, n in zip(("DEF", "MID", "FWD"), formation):
+            prob += pulp.lpSum(y[i] for i in ids if pos[i] == p) == n
+    else:
+        prob += pulp.lpSum(y[i] for i in ids if pos[i] == "DEF") >= 3
+        prob += pulp.lpSum(y[i] for i in ids if pos[i] == "DEF") <= 5
+        prob += pulp.lpSum(y[i] for i in ids if pos[i] == "MID") >= 2
+        prob += pulp.lpSum(y[i] for i in ids if pos[i] == "MID") <= 5
+        prob += pulp.lpSum(y[i] for i in ids if pos[i] == "FWD") >= 1
+        prob += pulp.lpSum(y[i] for i in ids if pos[i] == "FWD") <= 3
     for i in locked:
         if i in x:
             prob += x[i] == 1
@@ -204,8 +257,9 @@ def suggest_transfers(squad_ids: list[int], summary: pd.DataFrame,
                       gw_ep: dict[int, dict[int, float]], gws: list[int],
                       bank: float = 0.0, free_transfers: int = 1,
                       candidate_depth: int = 45, top_n: int = 12,
-                      min_availability: float = 0.75,
-                      max_moves: int = 2, decay: float = 0.88
+                      min_availability: float = 0.75, min_minutes: float = 0.0,
+                      max_moves: int = 2, decay: float = 0.88,
+                      formation: tuple[int, int, int] | None = None
                       ) -> tuple[list[dict], float, float]:
     """Rank single and double transfers by projected gain over the horizon.
 
@@ -229,7 +283,8 @@ def suggest_transfers(squad_ids: list[int], summary: pd.DataFrame,
     all_ep = gw_ep
 
     def horizon(ids: list[int]) -> float:
-        return squad_horizon_points(ids, all_pos, all_ep, gws, decay=decay)
+        return squad_horizon_points(ids, all_pos, all_ep, gws, decay=decay,
+                                    formation=formation)
 
     base = horizon(squad_ids)
     squad_value = sum(price[p] for p in squad_ids)
@@ -237,7 +292,8 @@ def suggest_transfers(squad_ids: list[int], summary: pd.DataFrame,
     # Candidate pool: the best few dozen per position that we could conceivably
     # afford, excluding anyone already owned or carrying an injury flag.
     pool = summary[(~summary.id.isin(squad_ids))
-                   & (summary.availability >= min_availability)]
+                   & (summary.availability >= min_availability)
+                   & (summary.xmins >= min_minutes)]
     candidates: dict[str, list[int]] = {}
     max_spend = bank + max(price[p] for p in squad_ids)
     for p, grp in pool.groupby("pos"):
