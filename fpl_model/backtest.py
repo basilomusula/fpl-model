@@ -60,6 +60,20 @@ class GameweekLog:
     history_past: dict[int, list[dict]] = field(default_factory=dict)  # by code
     label: str = ""
 
+    def __post_init__(self) -> None:
+        # The live API sends some numbers as text ("expected_goals": "0.45").
+        # Summing text columns concatenates them ("0.450.12") instead of
+        # adding, so every numeric field is coerced here, once, for both the
+        # CSV and the API constructors.
+        rows = self.rows.copy()
+        for col in SUM_FIELDS + ["value", "round", "xP", "opponent_team"]:
+            if col in rows.columns:
+                rows[col] = pd.to_numeric(rows[col], errors="coerce")
+        for col in SUM_FIELDS:
+            if col in rows.columns:
+                rows[col] = rows[col].fillna(0.0)
+        self.rows = rows
+
     @property
     def rounds(self) -> list[int]:
         return sorted(int(r) for r in self.rows["round"].dropna().unique())

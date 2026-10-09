@@ -32,10 +32,21 @@ def main(csv_dir: str, prior_dir: str, cache_dir: str, gw: int = 10) -> None:
         os.path.join(csv_dir, "teams.csv"), os.path.join(csv_dir, "fixtures.csv"), prior)
     bootstrap, summaries, fixtures, _ = log.as_of(gw)
 
-    # Make it look like the live API: a form figure, a deadline, chance fields.
+    # Make it look like the live API, including its habit of serving some
+    # numbers as text - that mismatch once crashed the live scorecard.
+    text_fields = ("expected_goals", "expected_assists", "expected_goal_involvements",
+                   "expected_goals_conceded", "influence", "creativity", "threat",
+                   "ict_index")
     for e in bootstrap["elements"]:
         e.setdefault("chance_of_playing_this_round", None)
         e.setdefault("cost_change_start", 0)
+        for f in text_fields + ("form", "points_per_game"):
+            e[f] = f"{float(e.get(f) or 0):.2f}"
+        e["selected_by_percent"] = f"{float(e.get('selected_by_percent') or 0):.1f}"
+    for s in summaries.values():
+        for h in s["history"] + s["history_past"]:
+            for f in text_fields:
+                h[f] = f"{float(h.get(f) or 0):.2f}"
     for ev in bootstrap["events"]:
         ev["deadline_time"] = f"2026-{8 + ev['id'] // 5:02d}-{1 + ev['id'] % 27:02d}T17:30:00Z"
 

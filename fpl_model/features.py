@@ -71,6 +71,10 @@ class ModelParams:
     cs_elasticity: float = 1.30      # clean-sheet points vs shutout probability
     season_weights: tuple = (1.0, 0.5, 0.2)  # prior seasons, most recent first
     xg_weight: float = 0.25          # 0: actual goals/assists; 1: expected ones
+    gk_capacity: bool = True         # a club fields one keeper: share his minutes
+    fixture_ref: str = "team"        # fixtures judged vs "league" average or the
+                                     # "team"'s own typical fixture (no double count)
+    pos_scale: tuple = (1.0, 0.8, 1.0, 1.0)  # GK, DEF, MID, FWD calibration
 
     def replace(self, **kw) -> "ModelParams":
         from dataclasses import replace as _r
@@ -238,6 +242,27 @@ def build_fixtures(fixtures_json: list[dict], teams: pd.DataFrame,
             "did not catch it. Please report this.")
     fixtures["p_clean_sheet"] = np.exp(-fixtures.xg_against)
     fixtures["opp_short"] = fixtures.opponent.map(teams.short_name)
+
+    # Each club's typical fixture: the same model against an average opponent,
+    # once at home and once away. A player's base rate was earned against a
+    # mix of opponents, so it already contains his own club's strength; the
+    # fixture adjustment should measure only how this opponent and venue
+    # differ from that mix. Comparing against the league average instead
+    # counts club strength twice - most of all for defenders, because
+    # clean-sheet odds rise steeply as a defence improves.
+    def blend(model_xg, base):
+        return model_xg * (1 - fdr_blend) + base * fdr_blend   # FDR 3 -> x1.0
+    ref = {}
+    for tid, tr in teams.iterrows():
+        for_h = blend(_xg_pair(tr.att_home, 1.0, BASE_HOME_GOALS), BASE_HOME_GOALS)
+        for_a = blend(_xg_pair(tr.att_away, 1.0, BASE_AWAY_GOALS), BASE_AWAY_GOALS)
+        ag_h = blend(_xg_pair(1.0, tr.def_home, BASE_AWAY_GOALS), BASE_AWAY_GOALS)
+        ag_a = blend(_xg_pair(1.0, tr.def_away, BASE_HOME_GOALS), BASE_HOME_GOALS)
+        ref[tid] = ((for_h + for_a) / 2, (ag_h + ag_a) / 2,
+                    (np.exp(-ag_h) + np.exp(-ag_a)) / 2)
+    fixtures["ref_xg_for"] = fixtures.team.map(lambda t: ref[t][0])
+    fixtures["ref_xg_against"] = fixtures.team.map(lambda t: ref[t][1])
+    fixtures["ref_p_clean_sheet"] = fixtures.team.map(lambda t: ref[t][2])
     fixtures = fixtures.sort_values(["gw", "team"]).reset_index(drop=True)
     return fixtures
 
@@ -539,7 +564,38 @@ def build_players(bootstrap: dict, summaries: dict[int, dict],
     # Price-aware prior: FPL's own pricing carries information about expected
     # output, especially for players with no Premier League history at all.
     out = _apply_price_prior(out)
+    if P.gk_capacity:
+        out = _share_keeper_minutes(out)
     return out.reset_index()
+
+
+def _share_keeper_minutes(players: pd.DataFrame) -> pd.DataFrame:
+    """A club fields exactly one goalkeeper, so its keepers share one slot.
+
+    Each keeper's start probability is estimated on its own, which lets a
+    club's first and second choice both look likely to start. Allocate the
+    single slot in order of likelihood: the first choice keeps his chance,
+    the backup gets only what is left. An injured first choice consumes
+    nothing, so the slot passes down. Minutes, 60-minute and appearance
+    probabilities are scaled by the same factor.
+    """
+    players = players.copy()
+    gks = players[players.pos == "GK"]
+    for _, grp in gks.groupby("team"):
+        avail = grp.availability.clip(0, 1)
+        eff = (grp.p_start * avail).sort_values(ascending=False)
+        remaining = 1.0
+        for pid, e in eff.items():
+            allowed = min(float(e), remaining)
+            remaining = max(remaining - allowed, 0.0)
+            a = float(avail.loc[pid])
+            if a <= 0 or e <= 0:
+                continue
+            factor = (allowed / a) / float(grp.loc[pid, "p_start"])
+            if factor < 0.999:
+                for col in ("p_start", "xmins", "p60", "p_app"):
+                    players.loc[pid, col] = float(players.loc[pid, col]) * factor
+    return players
 
 
 def _apply_price_prior(players: pd.DataFrame) -> pd.DataFrame:

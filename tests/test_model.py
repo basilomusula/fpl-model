@@ -80,6 +80,10 @@ def main(cache: str) -> int:
           f"max {players.xmins.max():.1f}")
     check("forwards earn nothing from clean sheets",
           float(players[players.pos == "FWD"].cs_share.max()) == 0.0)
+    gks_ = players[players.pos == "GK"]
+    gk_sum = (gks_.p_start * gks_.availability).groupby(gks_.team).sum()
+    check("each club's available keepers share at most one starting slot",
+          bool((gk_sum <= 1.0 + 1e-6).all()), f"max {gk_sum.max():.2f}")
 
     print("\nprojections")
     per_gw, summary = project(season, horizon=5)
@@ -280,6 +284,33 @@ def main(cache: str) -> int:
         check("captain pick never beats the best possible",
               m["captain_model"] <= m["captain_best"] + 1e-9)
 
+        # Regression: the live API serves several numbers as text
+        # ("expected_goals": "0.45"). Summing those once concatenated them
+        # into "0.000.00" and crashed the scorecard on the first live run.
+        import copy as _copy
+        boot_l, summ_l, fx_l, _ = log.as_of(10)
+        boot_l = _copy.deepcopy(boot_l); summ_l = _copy.deepcopy(summ_l)
+        text_fields = ("expected_goals", "expected_assists")
+        for e in boot_l["elements"]:
+            for f_ in text_fields + ("form",):
+                e[f_] = f"{float(e.get(f_) or 0):.2f}"
+        for s_ in summ_l.values():
+            for h in s_["history"] + s_["history_past"]:
+                for f_ in text_fields:
+                    h[f_] = f"{float(h.get(f_) or 0):.2f}"
+        api_log = GameweekLog.from_api(boot_l, fx_l, summ_l)
+        try:
+            m_api, _ = evaluate_gameweek(api_log, 9)
+            api_ok = np.isfinite(m_api["xi_model"])
+        except Exception as exc:  # noqa: BLE001
+            api_ok, m_api = False, {"error": repr(exc)}
+        check("replay copes with numbers served as text (live API format)",
+              api_ok, str(m_api.get("error", "")))
+        m_csv, _ = evaluate_gameweek(log, 9)
+        check("text-formatted input gives the same answer as numeric",
+              api_ok and abs(m_api["xi_model"] - m_csv["xi_model"]) < 1e-6,
+              f"{m_api.get('xi_model')} vs {m_csv['xi_model']}")
+
         # Regression guard: the shipped defaults must beat the naive season
         # points pick on the full past season. If a model change breaks this,
         # the change is making it worse at the thing it is for.
@@ -294,11 +325,33 @@ def main(cache: str) -> int:
         check("projections are not badly biased",
               abs(s["bias"]) < 0.5, f"bias {s['bias']:+.3f}")
         untuned = ModelParams(shrink_k=8.0, recent_weight=0.0, form_window=4,
-                              att_elasticity=0.9, cs_elasticity=1.0, xg_weight=0.0)
+                              att_elasticity=0.9, cs_elasticity=1.0, xg_weight=0.0,
+                              gk_capacity=False, fixture_ref="league",
+                              pos_scale=(1.0, 1.0, 1.0, 1.0))
         s0 = summarise(run_backtest(log, params=untuned))
         check("tuned defaults outscore the original settings",
               s["xi_model_mean"] >= s0["xi_model_mean"] - 1e-9,
               f"{s['xi_model_mean']:.2f} vs {s0['xi_model_mean']:.2f}")
+        check("captain beats the naive captain over a season",
+              s["captain_model_mean"] > s["captain_naive_mean"] + 0.5,
+              f"{s['captain_model_mean']:.2f} vs {s['captain_naive_mean']:.2f}")
+
+        # Regression: keepers and defenders were once projected far above
+        # what they deliver at the top end (74% and 78%), which put a
+        # defender in the armband 15 weeks in 37.
+        caps_pos, top_rows = {}, []
+        for g_ in [x for x in log.rounds if x >= 2]:
+            _, d_ = evaluate_gameweek(log, g_)
+            c_ = d_.loc[d_.ep_next.idxmax(), "pos"]
+            caps_pos[c_] = caps_pos.get(c_, 0) + 1
+            top_rows.append(d_[d_.ep_next >= 4.5][["pos", "ep_next", "actual"]])
+        top = pd.concat(top_rows)
+        check("a keeper or defender is rarely captain",
+              caps_pos.get("GK", 0) + caps_pos.get("DEF", 0) <= 4, str(caps_pos))
+        dtop = top[top.pos == "DEF"]
+        check("top-end defenders are not over-projected",
+              len(dtop) == 0 or dtop.actual.mean() >= 0.9 * dtop.ep_next.mean(),
+              f"delivered {dtop.actual.mean() / max(dtop.ep_next.mean(), 1e-9):.2f}")
 
     print("\ndegraded team strength ratings")
     # Regression: FPL ships the attack/defence ratings as zeros until it has

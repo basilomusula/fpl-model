@@ -153,17 +153,40 @@ Over the whole of 2025-26 (37 scorable gameweeks):
 
 | | Model | Naive season-points pick | Best possible in hindsight |
 |---|---|---|---|
-| Actual points of the chosen XI, per week | **60.5** | 51.4 | 155 |
+| Actual points of the chosen XI, per week (captain doubled) | **61.9** | 50.9 | 155 |
 | Weeks the model's XI scored more | **29 of 37** | — | — |
-| Rank correlation, projected vs actual | 0.42 | — | 1.00 |
-| Captain's actual points, per week | 6.1 | 5.7 | 17.4 |
+| Captain's actual points, per week | **7.4** | 5.7 | 17.4 |
+| Rank correlation, projected vs actual | 0.43 | — | 1.00 |
 
-So: a real edge of around nine points a week over picking on season points,
-sustained across most weeks, and a captaincy call that is only a little better
-than the obvious choice — that is where most of the remaining room is.
+An edge of about eleven points a week over picking on season points,
+sustained across most weeks, and a captain worth nearly two points a week
+more than the obvious choice.
 
-The default settings in `ModelParams` are the ones that search found best;
-against the original hand-picked settings they are worth +3.5 points a week.
+### Three corrections the backtest found
+
+The backtest showed systematic errors that a plain eye test would miss.
+Each fix below was chosen on the first half of the season and then checked
+on the second half, which it had not seen:
+
+* **One keeper per club.** Every keeper's chance of starting was estimated
+  on its own, so a club's first and second choice could both look likely to
+  play. Keepers were projected at nearly double what they scored. The model
+  now hands each club a single keeper slot, first choice first.
+* **Club strength was counted twice.** A defender's base rate already
+  reflects how good his club is; the fixture adjustment then compared that
+  club to the league average and boosted it again. Clean-sheet odds rise
+  steeply with defensive strength, so top-club defenders and keepers were
+  inflated most. Fixtures are now judged against the club's own typical
+  fixture, so only the opponent and venue move the number.
+* **Defenders are marked down 20%.** Even after that, defenders delivered
+  less than projected relative to attackers, and the model was putting a
+  defender in the armband fifteen weeks in thirty-seven. The correction
+  (fitted on the first half, confirmed on the second) took that to zero.
+
+Together they added 1.3 points a week to the XI and 1.4 a week to the
+captain's score, and turned a +0.18 projection bias into −0.07.
+
+The default settings in `ModelParams` are the ones the backtest found best.
 `tools/tune.py` re-runs the search for any season, which is worth doing each
 summer. The dashboard's **"How accurate has it been?"** panel runs the same
 replay on *this* season's completed gameweeks every time the page is built,

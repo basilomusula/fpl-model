@@ -57,12 +57,18 @@ def project(season: Season, horizon: int = 5,
     league_pcs = float(fixtures.p_clean_sheet.mean())
 
     fx = fixtures.copy()
-    fx["att_mult"] = np.clip((fx.xg_for / league_xg) ** params.att_elasticity,
+    if params.fixture_ref == "team" and "ref_xg_for" in fx.columns:
+        # Relative to the club's own typical fixture (see build_fixtures).
+        ref_xg, ref_pcs = fx.ref_xg_for, fx.ref_p_clean_sheet
+        ref_pen = fx.ref_xg_against.map(expected_conceded_penalty)
+    else:
+        ref_xg, ref_pcs = league_xg, league_pcs
+        ref_pen = expected_conceded_penalty(league_xga)
+    fx["att_mult"] = np.clip((fx.xg_for / ref_xg) ** params.att_elasticity,
                              *ATT_MULT_BOUNDS)
-    fx["cs_mult"] = np.clip((fx.p_clean_sheet / league_pcs) ** params.cs_elasticity,
+    fx["cs_mult"] = np.clip((fx.p_clean_sheet / ref_pcs) ** params.cs_elasticity,
                             *CS_MULT_BOUNDS)
-    fx["conceded_delta"] = (fx.xg_against.map(expected_conceded_penalty)
-                            - expected_conceded_penalty(league_xga))
+    fx["conceded_delta"] = fx.xg_against.map(expected_conceded_penalty) - ref_pen
 
     cols = ["id", "name", "full_name", "pos", "team", "team_short", "price",
             "base_p90", "xmins", "p60", "p_app", "p_start", "availability",
@@ -84,6 +90,12 @@ def project(season: Season, horizon: int = 5,
     # only while they are on the pitch.
     is_back = merged.pos.isin(["GK", "DEF"])
     ep = ep + np.where(is_back, merged.conceded_delta * merged.p60, 0.0)
+
+    # Per-position calibration, fitted on a walk-forward backtest: the raw
+    # projections systematically rate some positions too high relative to
+    # others, which skews captaincy and formation choices.
+    scale = dict(zip(("GK", "DEF", "MID", "FWD"), params.pos_scale))
+    ep = ep * merged.pos.map(scale).fillna(1.0).to_numpy()
 
     ep = pd.to_numeric(pd.Series(ep, index=merged.index), errors="coerce")
 

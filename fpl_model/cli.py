@@ -496,7 +496,17 @@ def main(argv=None) -> int:
 
     scorecard = None
     if args.scorecard:
-        scorecard = build_scorecard(season, args, say)
+        # The accuracy panel is a nice-to-have. If it fails, say so loudly
+        # but still publish the dashboard - never let it take the page down.
+        try:
+            scorecard = build_scorecard(season, args, say)
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            print(f"::warning::accuracy scorecard skipped: {type(exc).__name__}: {exc}")
+            print(f"  ! scorecard skipped ({type(exc).__name__}: {exc}); "
+                  "the rest of the dashboard is unaffected")
+            if not args.quiet:
+                traceback.print_exc()
 
     if not args.no_dashboard:
         ctx = {
