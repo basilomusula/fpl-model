@@ -231,6 +231,31 @@ def main(cache: str) -> int:
     check("transfer search respects a fixed shape",
           abs(base_f - squad_horizon_points(squad, pos, gw_ep, gws, formation=(3, 4, 3))) < 1e-6)
 
+    print("\nplanning horizons")
+    from types import SimpleNamespace
+    from fpl_model.cli import build_model_squads, horizon_summary
+    one = horizon_summary(summary, gw_ep, gws[:1])
+    check("a one-week horizon scores only this gameweek",
+          bool(np.allclose(one.set_index("id").ep_horizon,
+                           summary.set_index("id").ep_next.reindex(one.id).values)))
+    hz = build_model_squads(summary, gw_ep, gws, pos, SimpleNamespace(
+        budget=100.0, min_availability=0.75, min_minutes=0.0), [], [])
+    check("a best squad for every horizon",
+          sorted(hz, key=int) == [str(i) for i in range(1, len(gws) + 1)]
+          and all("auto" in hz[h] for h in hz), str(sorted(hz)))
+    legal_all = all(len(v["squad"]) == 15 and v["cost"] <= 100.0 + 1e-6
+                    and ix.loc[v["squad"]].pos.value_counts().to_dict() == SQUAD_LIMITS
+                    and int(ix.loc[v["squad"]].team.value_counts().max()) <= 3
+                    for h in hz for v in hz[h].values())
+    check("every horizon's squads are legal", legal_all)
+    last = str(len(gws))
+    s1, s5 = hz["1"]["auto"]["squad"], hz[last]["auto"]["squad"]
+    gw1 = lambda sq: squad_horizon_points(sq, pos, gw_ep, gws[:1])
+    check("the one-week squad wins this gameweek",
+          gw1(s1) >= gw1(s5) - 0.5, f"{gw1(s1):.1f} vs {gw1(s5):.1f}")
+    check("the full-horizon squad wins the full horizon",
+          squad_horizon_points(s5, pos, gw_ep, gws) >= squad_horizon_points(s1, pos, gw_ep, gws) - 0.5)
+
     print("\nfixture difficulty ticker")
     from fpl_model.cli import build_ticker
     tick = build_ticker(season, gws)

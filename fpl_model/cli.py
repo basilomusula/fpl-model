@@ -293,6 +293,57 @@ def to_records(summary_ix: pd.DataFrame, ids: list[int]) -> list[dict]:
 # main
 # ---------------------------------------------------------------------- #
 
+def horizon_summary(summary: pd.DataFrame, gw_ep: dict, gws: list[int],
+                    decay: float = 0.88) -> pd.DataFrame:
+    """The summary table re-scored over the first len(gws) gameweeks only."""
+    out = summary.copy()
+    w = {g: decay ** i for i, g in enumerate(gws)}
+    plain = {pid: sum(gw_ep.get(pid, {}).get(g, 0.0) for g in gws) for pid in out.id}
+    weighted = {pid: sum(gw_ep.get(pid, {}).get(g, 0.0) * w[g] for g in gws)
+                for pid in out.id}
+    out["ep_horizon"] = out.id.map(plain).fillna(0.0)
+    out["ep_weighted"] = out.id.map(weighted).fillna(0.0)
+    return out
+
+
+def build_model_squads(summary: pd.DataFrame, gw_ep: dict, gws: list[int],
+                       pos_map: dict, args, locked: list[int],
+                       banned: list[int]) -> dict[str, dict[str, dict]]:
+    """{horizon: {formation: best squad}} for every horizon 1..len(gws).
+
+    A one-week squad is built purely for this gameweek's fixtures; a
+    five-week squad trades some of that for the run ahead. Comparing them
+    is how you tell a short-term punt from a long-term hold.
+    """
+    out: dict[str, dict[str, dict]] = {}
+    for h in range(1, len(gws) + 1):
+        hg = gws[:h]
+        sh = horizon_summary(summary, gw_ep, hg)
+        per: dict[str, dict] = {}
+        for shp in [None] + FORMATIONS:
+            try:
+                b = optimise_squad(sh, budget=args.budget,
+                                   min_availability=args.min_availability,
+                                   min_minutes=args.min_minutes,
+                                   locked=locked, banned=banned,
+                                   formation=shp, verbose=False)
+            except (RuntimeError, ValueError):
+                continue    # e.g. locked players that cannot fit this shape
+            ep1 = {pid: gw_ep.get(pid, {}).get(hg[0], 0.0) for pid in b["squad"]}
+            first = best_xi_for_gw(b["squad"], pos_map, ep1, formation=shp)
+            per[fmt_formation(shp)] = {
+                "squad": [int(x) for x in b["squad"]],
+                "cost": b["cost"],
+                "bank": round(args.budget - b["cost"], 1),
+                "xi_next": round(first.xi_points + ep1.get(first.captain, 0.0), 2),
+                "horizon": round(squad_horizon_points(b["squad"], pos_map, gw_ep, hg,
+                                                      formation=shp), 2),
+                "first_formation": first.formation,
+            }
+        out[str(h)] = per
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="fpl", formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -404,50 +455,48 @@ def main(argv=None) -> int:
     gw_ep = gw_matrix(per_gw, summary.id.tolist(), gws)
     pos_map = summary_ix.pos.to_dict()
 
-    # The model's own best 15 is built for every formation - the page lets you
-    # switch between them, and each is the benchmark for the others. One
-    # solve takes a fraction of a second, so all nine cost almost nothing.
+    # The model's own best 15 is built for every planning horizon (this
+    # gameweek only, the next two, ... up to the full horizon) and every
+    # formation - the page lets you switch between them. One solve takes a
+    # fraction of a second, so even 5 x 9 of them cost little.
     locked = resolve_players(args.lock, summary) if args.lock else []
     banned = resolve_players(args.ban, summary) if args.ban else []
-    model_squads: dict[str, dict] = {}
-    for shp in [None] + FORMATIONS:
-        try:
-            b = optimise_squad(summary, budget=args.budget,
-                               min_availability=args.min_availability,
-                               min_minutes=args.min_minutes,
-                               locked=locked, banned=banned,
-                               formation=shp, verbose=False)
-        except (RuntimeError, ValueError):
-            continue    # e.g. locked players that cannot fit this shape
-        ep1 = {pid: gw_ep.get(pid, {}).get(gws[0], 0.0) for pid in b["squad"]}
-        first = best_xi_for_gw(b["squad"], pos_map, ep1, formation=shp)
-        model_squads[fmt_formation(shp)] = {
-            "squad": [int(x) for x in b["squad"]],
-            "cost": b["cost"],
-            "bank": round(args.budget - b["cost"], 1),
-            "xi_next": round(first.xi_points + ep1.get(first.captain, 0.0), 2),
-            "horizon": round(squad_horizon_points(b["squad"], pos_map, gw_ep, gws,
-                                                  formation=shp), 2),
-            "first_formation": first.formation,
-        }
+    model_squads = build_model_squads(summary, gw_ep, gws, pos_map, args,
+                                      locked, banned)
+    full = str(len(gws))
     key = fmt_formation(shape)
-    if key not in model_squads:
+    if key not in model_squads.get(full, {}):
         raise SystemExit(f"could not build a legal squad in {key} with these settings")
-    model_build = model_squads[key]
+    model_build = model_squads[full][key]
 
     if not args.quiet:
-        best_h = model_squads["auto"]["horizon"]
+        names = summary_ix.name.to_dict()
+        best_h = model_squads[full]["auto"]["horizon"]
         say(f"\n{BAR}\nBEST £{args.budget:.1f}m SQUAD BY FORMATION"
             f"   (projected points, next {len(gws)} GWs, captain included)")
         for k in ["auto"] + [fmt_formation(f) for f in FORMATIONS]:
-            if k not in model_squads:
+            if k not in model_squads[full]:
                 continue
-            ms = model_squads[k]
+            ms = model_squads[full][k]
             gap = ms["horizon"] - best_h
             note = (f"  (fields {ms['first_formation']} this week)" if k == "auto"
                     else f"  {gap:+.1f}" if abs(gap) >= 0.05 else "  = best")
             mark = " ←" if k == key else ""
             say(f"  {k:<6} {ms['horizon']:>7.1f}{note}{mark}")
+
+        say(f"\n{BAR}\nBEST £{args.budget:.1f}m SQUAD BY PLANNING HORIZON   "
+            f"(auto formation; changes against the {len(gws)}-GW squad)")
+        ref = set(model_squads[full]["auto"]["squad"])
+        for h in sorted(model_squads, key=int):
+            ms = model_squads[h].get("auto")
+            if not ms:
+                continue
+            ins = [names[i] for i in ms["squad"] if i not in ref]
+            outs = [names[i] for i in ref if i not in set(ms["squad"])]
+            label = "this GW" if h == "1" else f"next {h} GWs"
+            change = ("same squad" if not ins else
+                      f"in: {', '.join(ins)} · out: {', '.join(outs)}")
+            say(f"  {label:<12} {ms['horizon']:>6.1f} pts   {change}")
 
     if mine:
         squad_ids, bank, free_transfers = mine
@@ -547,9 +596,10 @@ def main(argv=None) -> int:
                      "used": DEFAULT_PARAMS.team_form},
             "gws": [int(g) for g in gws],
             "initial_squad": squad_ids if mine else [],
-            "model_squad": model_squads["auto"]["squad"],
-            "model_bank": model_squads["auto"]["bank"],
+            "model_squad": model_squads[full]["auto"]["squad"],
+            "model_bank": model_squads[full]["auto"]["bank"],
             "model_squads": model_squads,
+            "horizon_default": len(gws),
             "formation": key,
             "budget": args.budget,
             "bank_initial": bank, "free_transfers_initial": free_transfers,

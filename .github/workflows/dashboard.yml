@@ -28,13 +28,16 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+# Machines and actions are pinned to known versions rather than "latest", so a
+# change on GitHub's side (ubuntu-latest moved to Ubuntu 26 in October 2026)
+# cannot quietly break the daily build. All of these run on Node 24.
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -45,7 +48,7 @@ jobs:
       # ~700 player history files barely change within a gameweek, so keep
       # them between runs. Without this every run re-downloads the lot.
       - name: Restore FPL cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .fpl_cache
           key: fpl-cache-${{ github.run_id }}
@@ -74,12 +77,13 @@ jobs:
           test -s _site/index.html || { echo "::error::no dashboard produced"; exit 1; }
           echo "index.html is $(wc -c < _site/index.html) bytes"
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
+          include-hidden-files: true   # keep .nojekyll
 
       # A downloadable copy too, so a failed Pages deploy never loses the run.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: fpl-dashboard
@@ -91,10 +95,10 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -463,6 +463,27 @@ h2{font-size:15px;font-weight:640;letter-spacing:-.005em;margin:0 0 3px}
 .chip i{font-style:normal;font-size:7.5px;font-weight:700;opacity:.85}
 .chip.away{letter-spacing:-.01em}
 .chip.res{min-width:16px;justify-content:center;margin-right:2px;font-weight:700}
+.hors button{min-width:64px}
+table.bypos th[data-h]{cursor:pointer;user-select:none}
+table.bypos th.hcol.on,table.bypos td.hcol.on{background:color-mix(in srgb,var(--series) 10%,transparent);font-weight:700}
+table.bypos th.hcol.on::after{content:" ▾";font-size:9px}
+table.bypos td.pl{min-width:118px}
+table.bypos td.pl .sub{display:block;font-size:11px;color:var(--dim);font-weight:500;margin-top:1px;white-space:nowrap}
+table.bypos td.fx{white-space:nowrap}
+.bp-more{display:flex;justify-content:center;margin-top:10px}
+.bp-more .btn[hidden]{display:none}
+label.chk{display:inline-flex;align-items:center;gap:5px;cursor:pointer}
+@media (max-width:640px){
+  table.bypos .fx,table.bypos .rk{display:none}
+  table.bypos th,table.bypos td{padding-left:3px;padding-right:3px}
+  table.bypos th[data-h]{font-size:10.5px;letter-spacing:-.01em}
+  table.bypos th.hcol.on::after{content:""}
+  table.bypos td.pl{min-width:0;padding-left:8px}
+  table.bypos td.pl .sub{white-space:normal;font-size:10.5px}
+  .hors{flex-wrap:nowrap;width:100%}
+  .hors button{min-width:0;flex:1 1 0;padding-left:2px;padding-right:2px}
+  .hors button span{font-size:9.5px}
+}
 table.formtbl td.rec,table.formtbl td.tick{white-space:nowrap}
 .chip.f1{background:#d0edcf;color:#10120f}
 .chip.f2{background:#97d496;color:#10120f}
@@ -640,6 +661,7 @@ JS = """
 const RANKS = __RANKS__, DEADLINE = "__DEADLINE__";
 const el = id => document.getElementById(id);
 let sortKey = "ep_horizon", sortDir = -1;
+let HROWS = null;   // rankings re-scored for the chosen horizon, set once the picker loads
 
 function chips(list){
   if(!Array.isArray(list) || !list.length) return '<span class="chip chip-none">–</span>';
@@ -659,10 +681,10 @@ function fdrBadge(v){
 
 function render(){
   const q = (el("q").value || "").toLowerCase();
-  const pos = document.querySelector('.seg button[aria-pressed="true"]').dataset.pos;
+  const pos = document.querySelector('#rk-pos button[aria-pressed="true"]').dataset.pos;
   const maxp = parseFloat(el("maxp").value || "99");
   const minm = parseFloat(el("minmins").value || "0");
-  let rows = RANKS.filter(r =>
+  let rows = (HROWS || RANKS).filter(r =>
     (!q || r.name.toLowerCase().includes(q) || r.team_short.toLowerCase().includes(q))
     && (pos === "ALL" || r.pos === pos) && r.price <= maxp
     && (r.xmins || 0) >= minm);
@@ -698,8 +720,8 @@ document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
   sortDir = (k === sortKey) ? -sortDir : -1;
   sortKey = k; render();
 });
-document.querySelectorAll('.seg button').forEach(b => b.onclick = () => {
-  document.querySelectorAll('.seg button').forEach(o =>
+document.querySelectorAll('#rk-pos button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#rk-pos button').forEach(o =>
     o.setAttribute("aria-pressed", o === b ? "true" : "false"));
   render();
 });
@@ -739,6 +761,7 @@ render();
 const PLAYERS = __PLAYERS__, GWS = __GWS__;
 const INITIAL_SQUAD = __INITIAL_SQUAD__, MODEL_SQUADS = __MODEL_SQUADS__;
 const BANK0 = __BANK0__, FT0 = __FT0__, FORMATION0 = "__FORMATION0__", BUDGET = __BUDGET__;
+const HORIZON0 = __HORIZON0__;
 const DECAY = 0.88;
 const BUDGET_TXT = "£" + (Number.isInteger(BUDGET) ? BUDGET : BUDGET.toFixed(1)) + "m";
 const P = Object.fromEntries(PLAYERS.map(p => [p.id, p]));
@@ -748,9 +771,14 @@ const POSNAME = {GK:"Goalkeeper", DEF:"Defenders", MID:"Midfielders", FWD:"Forwa
 const STORE = "fpl-squad-v1", UI_STORE = "fpl-ui-v1";
 const FORM_KEYS = ["auto", ...FORMS.map(f => f.join("-"))];
 const shapeOf = k => (!k || k === "auto") ? null : k.split("-").map(Number);
-const WEEK_WEIGHT = GWS.reduce((s, _, i) => s + DECAY ** i, 0) || 1;
+const HKEYS = GWS.map((_, i) => String(i + 1));
+const gwsFor = h => GWS.slice(0, +h || GWS.length);
+const weekWeight = h => gwsFor(h).reduce((s, _, i) => s + DECAY ** i, 0) || 1;
+const hText = h => +h === 1 ? `GW${GWS[0]} only` : `the next ${h} gameweeks`;
 
 const ep = (id, gw) => (P[id] && P[id].ep[String(gw)]) || 0;
+const sumEp = (id, h) => gwsFor(h).reduce((s, g) => s + ep(id, g), 0);
+const wEp = (id, h) => gwsFor(h).reduce((s, g, i) => s + ep(id, g) * DECAY ** i, 0);
 const money = v => "£" + Number(v).toFixed(1) + "m";
 
 function loadState(){
@@ -768,6 +796,9 @@ function loadUI(){
   if (!FORM_KEYS.includes(u.formation)) u.formation = FORM_KEYS.includes(FORMATION0) ? FORMATION0 : "auto";
   if (u.view !== "mine" && u.view !== "model") u.view = loadState() ? "mine" : "model";
   if (u.view === "mine" && !loadState()) u.view = "model";
+  if (!HKEYS.includes(String(u.horizon)))
+    u.horizon = HKEYS.includes(String(HORIZON0)) ? String(HORIZON0) : HKEYS[HKEYS.length - 1];
+  u.horizon = String(u.horizon);
   return u;
 }
 function saveUI(u){ try { localStorage.setItem(UI_STORE, JSON.stringify(u)); } catch(e){} }
@@ -798,9 +829,9 @@ function bestXI(ids, gw, shape){
   return {xi, bench, benchGk, pts: bestPts, formation: bestShape.join("-"), captain, vice};
 }
 
-function horizonPts(ids, shape){
+function horizonPts(ids, shape, h){
   let total = 0;
-  GWS.forEach((gw, i) => {
+  gwsFor(h).forEach((gw, i) => {
     const line = bestXI(ids, gw, shape); if (!line) return;
     total += (line.pts + ep(line.captain, gw)) * DECAY ** i;
   });
@@ -818,14 +849,14 @@ function legal(ids){
   return {ok: ids.length === 15 && !probs.length, problems: probs, pos};
 }
 
-function suggestTransfers(ids, bank, ft, shape){
-  const base = horizonPts(ids, shape);
+function suggestTransfers(ids, bank, ft, shape, h){
+  const base = horizonPts(ids, shape, h);
   const owned = new Set(ids), counts = clubCounts(ids);
   const maxOwned = Math.max(...ids.map(id => P[id].price));
   const cands = {GK:[], DEF:[], MID:[], FWD:[]};
   PLAYERS.filter(p => !owned.has(p.id) && p.availability >= 0.75 && p.xmins >= 1
                    && p.price <= bank + maxOwned + 0.05)
-         .sort((a,b) => b.ep_weighted - a.ep_weighted)
+         .map(p => [p, wEp(p.id, h)]).sort((a,b) => b[1] - a[1]).map(x => x[0])
          .forEach(p => { if (cands[p.pos].length < 40) cands[p.pos].push(p.id); });
   const singles = [];
   for (const out of ids){
@@ -834,7 +865,7 @@ function suggestTransfers(ids, bank, ft, shape){
       if (cost > bank + 1e-9) continue;
       if (P[inn].team !== P[out].team && (counts[P[inn].team]||0) + 1 > 3) continue;
       const next = ids.map(id => id === out ? inn : id);
-      const gain = horizonPts(next, shape) - base;
+      const gain = horizonPts(next, shape, h) - base;
       const hit = ft >= 1 ? 0 : 4;
       singles.push({moves:1, out:[out], inn:[inn], cost, gain, hit, net: gain - hit});
     }
@@ -848,7 +879,7 @@ function suggestTransfers(ids, bank, ft, shape){
     const cost = a.cost + b.cost; if (cost > bank + 1e-9) continue;
     const next = ids.filter(id => id !== a.out[0] && id !== b.out[0]).concat([a.inn[0], b.inn[0]]);
     if (Object.values(clubCounts(next)).some(n => n > 3)) continue;
-    const gain = horizonPts(next, shape) - base, hit = Math.max(0, 2 - ft) * 4;
+    const gain = horizonPts(next, shape, h) - base, hit = Math.max(0, 2 - ft) * 4;
     results.push({moves:2, out:[a.out[0], b.out[0]], inn:[a.inn[0], b.inn[0]], cost, gain, hit, net: gain - hit});
   }
   results.sort((a,b) => b.net - a.net || a.cost - b.cost);
@@ -880,10 +911,14 @@ function cardHTML(id, gw, badge){
     <div class="card-fix">${chips((p.fixture_list||[]).slice(0,3))}</div>
     <div class="card-mins">${Math.round(p.xmins)}' expected</div></div>`;
 }
+function modelSquads(h){
+  return MODEL_SQUADS[String(h)] || MODEL_SQUADS[HKEYS[HKEYS.length - 1]] || {};
+}
 function activeSquad(ui){
   if (ui.view === "mine"){ const s = loadState(); if (s) return s; }
-  const k = MODEL_SQUADS[ui.formation] ? ui.formation : "auto";
-  const ms = MODEL_SQUADS[k];
+  const sq = modelSquads(ui.horizon);
+  const k = sq[ui.formation] ? ui.formation : "auto";
+  const ms = sq[k];
   return ms ? {squad: ms.squad.slice(), bank: ms.bank, ft: FT0, source: "model", key: k} : null;
 }
 
@@ -891,9 +926,9 @@ function renderFormations(ui){
   const mine = loadState();
   const pts = {};
   for (const k of FORM_KEYS){
-    const ids = ui.view === "mine" ? (mine && mine.squad)
-                                   : (MODEL_SQUADS[k] && MODEL_SQUADS[k].squad);
-    pts[k] = ids ? horizonPts(ids, shapeOf(k)) : null;
+    const sq = modelSquads(ui.horizon);
+    const ids = ui.view === "mine" ? (mine && mine.squad) : (sq[k] && sq[k].squad);
+    pts[k] = ids ? horizonPts(ids, shapeOf(k), ui.horizon) : null;
   }
   const fixed = FORM_KEYS.slice(1).filter(k => pts[k] !== null);
   const bestFixed = fixed.reduce((a, k) => (a === null || pts[k] > pts[a]) ? k : a, null);
@@ -909,7 +944,7 @@ function renderFormations(ui){
   }).join("");
 
   const v = pts[ui.formation], gap = (v !== null && pts.auto !== null) ? pts.auto - v : 0;
-  const perWeek = gap / WEEK_WEIGHT;
+  const perWeek = gap / weekWeight(ui.horizon);
   let hint;
   if (ui.formation === "auto"){
     hint = ui.view === "mine"
@@ -921,9 +956,9 @@ function renderFormations(ui){
     hint = (ui.view === "mine"
       ? `Fielding your squad in <b>${ui.formation}</b> every week`
       : `The best ${BUDGET_TXT} squad built for <b>${ui.formation}</b>`)
-      + ` projects <b>${gap.toFixed(1)} pts</b> below auto over the next ${GWS.length} gameweeks — about ${perWeek.toFixed(1)} a week. A fair price if you prefer the shape.`;
+      + ` projects <b>${gap.toFixed(1)} pts</b> below auto over ${hText(ui.horizon)}` + (+ui.horizon > 1 ? ` — about ${perWeek.toFixed(1)} a week` : "") + `. A fair price if you prefer the shape.`;
   }
-  el("form-hint").innerHTML = hint + ' <span class="dim">Figures: projected points over the next ' + GWS.length + ' gameweeks, captain included, relative to auto.</span>';
+  el("form-hint").innerHTML = hint + ` <span class="dim">Figures: projected points over ${hText(ui.horizon)}, captain included, relative to auto.</span>`;
 }
 
 function renderActive(){
@@ -936,7 +971,9 @@ function renderActive(){
       b.title = mine ? "Your squad" : "Pick your squad first";
     }
   });
+  renderHorizons(ui);
   renderFormations(ui);
+  setHorizonViews(ui.horizon);
   const state = activeSquad(ui);
   if (!state) return;
   renderSquad(state, shapeOf(ui.formation), ui);
@@ -961,7 +998,7 @@ function renderSquad(state, shape, ui){
     + line.bench.map((id,i) => cardHTML(id, gw, `<span class="badge sub">${i+1}</span>`)).join("");
 
   const cost = state.squad.reduce((s,id) => s + P[id].price, 0);
-  const hp = horizonPts(state.squad, shape);
+  const hp = horizonPts(state.squad, shape, ui.horizon);
   const rel = id => (P[id].p_app||1) * (P[id].availability ?? 1);
   el("t-xi").innerHTML = `${line.pts.toFixed(1)}<span class="unit"> pts</span>`;
   el("t-xi-n").textContent = `${line.formation} · captain doubles on top`;
@@ -972,17 +1009,20 @@ function renderSquad(state, shape, ui){
   el("t-val").textContent = money(cost);
   el("t-val-n").textContent = `${money(state.bank)} in the bank`;
   el("t-hor").innerHTML = `${hp.toFixed(0)}<span class="unit"> pts</span>`;
+  el("t-hor-k").textContent = +ui.horizon === 1 ? `GW${gw} total` : `Next ${ui.horizon} GWs`;
+  el("t-hor-n").textContent = +ui.horizon === 1 ? "XI with the captain doubled" : "best XI each week, captain included";
+  el("tr-h").textContent = hText(ui.horizon);
 
   const isModel = state.source === "model";
   el("btn-adopt").hidden = !isModel;
   if (isModel){
     el("transfer-body").innerHTML = `<tr><td colspan="6" class="empty">This is the model&rsquo;s own best squad, so there is nothing to transfer. Switch to <b>My squad</b> for suggestions on yours.</td></tr>`;
     const label = state.key === "auto" ? "shape free to change" : state.key;
-    el("squad-status").innerHTML = `<b>Best ${BUDGET_TXT} squad</b> · ${label} · ${money(cost)} · ${money(state.bank)} left <span class="dim">· the model's pick</span>`;
+    el("squad-status").innerHTML = `<b>Best ${BUDGET_TXT} squad</b> for ${hText(ui.horizon)} · ${label} · ${money(cost)} · ${money(state.bank)} left <span class="dim">· the model's pick</span>`;
     return;
   }
 
-  const tr = suggestTransfers(state.squad, state.bank, state.ft, shape);
+  const tr = suggestTransfers(state.squad, state.bank, state.ft, shape, ui.horizon);
   el("transfer-body").innerHTML = tr.list.length ? tr.list.map(r => {
     const [cls, label] = r.net > 2 ? ["yes","Worth it"] : r.net > 0.5 ? ["maybe","Marginal"] : ["no","Hold"];
     const costTxt = Math.abs(r.cost) < 0.05 ? "level" : (r.cost > 0 ? "−" : "+") + money(Math.abs(r.cost));
@@ -992,10 +1032,118 @@ function renderSquad(state, shape, ui){
       <td class="num">${costTxt}</td>
       <td class="num">${r.gain.toFixed(2)} ${r.hit ? `<span class="hit">−${r.hit} hit</span>` : ""}</td>
       <td class="num"><span class="verdict ${cls}">${r.net.toFixed(2)} <i>${label}</i></span></td></tr>`;
-  }).join("") : '<tr><td colspan="6" class="empty">Nothing improves this squad over the horizon — bank the free transfer.</td></tr>';
+  }).join("") : `<tr><td colspan="6" class="empty">Nothing improves this squad over ${hText(ui.horizon)} — bank the free transfer.</td></tr>`;
 
   const src = state.source === "fpl" ? "loaded from your FPL team" : "saved in this browser";
   el("squad-status").innerHTML = `<b>Your squad</b> · ${money(cost)} · ${money(state.bank)} in the bank · ${state.ft} free transfer${state.ft===1?"":"s"} <span class="dim">· ${src}</span>`;
+}
+
+/* ---- planning horizon -------------------------------------------- */
+function renderHorizons(ui){
+  const mine = loadState();
+  el("hors").innerHTML = HKEYS.map(h => {
+    let ids = null, shape = shapeOf(ui.formation);
+    if (ui.view === "mine") ids = mine && mine.squad;
+    else { const sq = modelSquads(h), k = sq[ui.formation] ? ui.formation : "auto";
+           ids = sq[k] && sq[k].squad; shape = shapeOf(k); }
+    const v = ids ? horizonPts(ids, shape, h) / weekWeight(h) : null;
+    const on = h === String(ui.horizon);
+    const name = h === "1" ? "This GW" : `${h} GWs`;
+    const tip = h === "1" ? `GW${GWS[0]} only` : `GW${GWS[0]}–GW${GWS[+h - 1]}`;
+    return `<button data-h="${h}" aria-pressed="${on}" title="${tip}">
+      <b>${name}</b><span>${v === null ? "–" : v.toFixed(1) + " /wk"}</span></button>`;
+  }).join("");
+
+  let hint;
+  if (ui.view === "mine"){
+    hint = `Transfers and the projected total are judged over <b>${hText(ui.horizon)}</b>. ` +
+           `The XI, captain and bench below are always for GW${GWS[0]}.`;
+  } else {
+    const k = ui.formation, now = modelSquads(ui.horizon), ref = HKEYS[HKEYS.length - 1];
+    const other = String(ui.horizon) === ref ? "1" : ref;
+    const a = (now[k] || now.auto || {}).squad || [], b = ((modelSquads(other)[k] || modelSquads(other).auto) || {}).squad || [];
+    const A = new Set(a), B = new Set(b);
+    const ins = a.filter(id => !B.has(id)).map(id => P[id].name);
+    const outs = b.filter(id => !A.has(id)).map(id => P[id].name);
+    const otherTxt = other === "1" ? `a GW${GWS[0]}-only squad` : `the ${other}-gameweek squad`;
+    hint = `The best ${BUDGET_TXT} squad for <b>${hText(ui.horizon)}</b>. ` +
+      (HKEYS.length < 2 ? "" : !ins.length ? `Same fifteen as ${otherTxt}.`
+        : (String(ui.horizon) === ref ? `${otherTxt[0].toUpperCase() + otherTxt.slice(1)} would bring in ` : `Against ${otherTxt} it brings in `) +
+          `<span class="swap-in">${ins.join(", ")}</span> for <span class="swap-out">${outs.join(", ")}</span>.`);
+  }
+  el("hor-hint").innerHTML = hint + ' <span class="dim">Figures: average projected points a week for that squad, captain included.</span>';
+}
+
+function setHorizonViews(h){
+  const gws = gwsFor(h), set = new Set(gws.map(String));
+  HROWS = PLAYERS.map(p => {
+    const tot = sumEp(p.id, h);
+    const fx = (p.fixture_list || []).filter(f => set.has(String(f.gw)));
+    return Object.assign({}, p, {
+      ep_horizon: tot, value: p.price > 0 ? tot / p.price : 0,
+      mean_fdr: fx.length ? fx.reduce((s, f) => s + f.fdr, 0) / fx.length : null,
+      fixture_list: fx.length ? fx : p.fixture_list});
+  });
+  el("th-hor").textContent = +h === 1 ? "This GW" : `Next ${h}`;
+  el("bars-h").textContent = +h === 1 ? `GW${GWS[0]}` : `next ${h} gameweeks`;
+  render(); renderBars(h); renderByPos();
+}
+
+function renderBars(h){
+  const top = PLAYERS.map(p => [p, sumEp(p.id, h)]).sort((a,b) => b[1] - a[1]).slice(0, 16);
+  if (!top.length) return;
+  const hi = top[0][1] || 1;
+  const esc = t => String(t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;");
+  el("bars").innerHTML = top.map(([p, v]) => {
+    const tip = `${p.name} · ${p.team_short} · ${p.pos} · £${p.price.toFixed(1)}m\n${v.toFixed(1)} projected points\n${ep(p.id, GWS[0]).toFixed(1)} next gameweek`;
+    return `<div class="bar" tabindex="0" title="${esc(tip)}" data-tip="${esc(tip)}">
+      <div class="bar-name">${esc(p.name)}<i>${esc(p.team_short)}</i></div>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.max(2, 100 * v / hi).toFixed(1)}%"></div></div>
+      <div class="bar-num">${v.toFixed(1)}</div></div>`;
+  }).join("");
+}
+
+/* ---- expected points by position ------------------------------------ */
+const bp = {pos: "GK", sortH: null, all: false};
+function renderByPos(){
+  if (!el("bp-body")) return;
+  const ui = loadUI(), sortH = bp.sortH || ui.horizon;
+  el("bp-head").innerHTML = `<th class="num rk">#</th><th>Player</th>` + HKEYS.map(h => `<th class="num hcol-h${h === String(sortH) ? " hcol on" : ""}" data-h="${h}"
+      title="Sort by ${h === "1" ? "this gameweek" : "the next " + h + " gameweeks"}">${h === "1" ? "GW" + GWS[0] : h + " GWs"}</th>`).join("")
+    + `<th class="fx">Fixtures</th>`;
+  const q = (el("bp-q").value || "").toLowerCase(), maxp = parseFloat(el("bp-maxp").value || "99");
+  const starters = el("bp-starters").checked;
+  const rows = PLAYERS.filter(p => p.pos === bp.pos && p.price <= maxp
+      && (!starters || (p.xmins || 0) >= 60)
+      && (!q || p.name.toLowerCase().includes(q) || p.team_short.toLowerCase().includes(q)))
+    .map(p => ({p, v: HKEYS.map(h => sumEp(p.id, h))}))
+    .sort((a, b) => b.v[+sortH - 1] - a.v[+sortH - 1] || b.v[0] - a.v[0]);
+  const shown = bp.all ? rows : rows.slice(0, 30);
+  el("bp-body").innerHTML = shown.map((r, i) => `<tr>
+      <td class="num dim rk">${i + 1}</td>
+      <td class="pl"><b>${r.p.name}</b>${r.p.news ? " " + flagHTML(r.p) : ""}
+        <span class="sub">${r.p.team_short} · ${money(r.p.price)} · ${Math.round(r.p.xmins || 0)}'</span></td>`
+    + r.v.map((v, j) => `<td class="num${String(j + 1) === String(sortH) ? " hcol on" : ""}">${v.toFixed(1)}</td>`).join("")
+    + `<td class="fx">${chips(r.p.fixture_list)}</td></tr>`).join("")
+    || `<tr><td colspan="${3 + HKEYS.length}" class="empty">No players match those filters.</td></tr>`;
+  el("bp-count").textContent = `${rows.length} ${{GK:"goalkeepers", DEF:"defenders", MID:"midfielders", FWD:"forwards"}[bp.pos]}`;
+  const more = el("bp-more");
+  more.hidden = rows.length <= 30;
+  more.textContent = bp.all ? "Show top 30" : `Show all ${rows.length}`;
+}
+function wireByPos(){
+  if (!el("bp-body")) return;
+  el("bp-pos").onclick = e => {
+    const b = e.target.closest("button[data-pos]"); if (!b) return;
+    document.querySelectorAll("#bp-pos button").forEach(o => o.setAttribute("aria-pressed", o === b ? "true" : "false"));
+    bp.pos = b.dataset.pos; bp.all = false; renderByPos();
+  };
+  el("bp-head").onclick = e => {
+    const th = e.target.closest("th[data-h]"); if (!th) return;
+    bp.sortH = th.dataset.h; renderByPos();
+  };
+  ["bp-q", "bp-maxp", "bp-starters"].forEach(id => el(id).oninput = renderByPos);
+  el("bp-more").onclick = () => { bp.all = !bp.all; renderByPos(); };
 }
 
 /* ---- editor ------------------------------------------------------- */
@@ -1009,9 +1157,10 @@ function renderEditor(){
   const q = el("ed-q").value.toLowerCase();
   const pos = document.querySelector("#ed-pos button[aria-pressed=true]").dataset.pos;
   const owned = new Set(draft.squad), counts = clubCounts(draft.squad), chk = legal(draft.squad);
+  const H = loadUI().horizon;
   const list = PLAYERS.filter(p => !owned.has(p.id) && (pos === "ALL" || p.pos === pos)
       && (!q || p.name.toLowerCase().includes(q) || p.team_short.toLowerCase().includes(q)))
-    .sort((a,b) => b.ep_horizon - a.ep_horizon).slice(0, 60);
+    .sort((a,b) => sumEp(b.id, H) - sumEp(a.id, H)).slice(0, 60);
   el("ed-list").innerHTML = list.map(p => {
     const full = chk.pos[p.pos] >= LIMITS[p.pos], club = (counts[p.team]||0) >= 3;
     const why = full ? `${p.pos} full` : club ? "3 from club" : "";
@@ -1032,11 +1181,16 @@ function renderEditor(){
   el("ed-save").disabled = !chk.ok;
 }
 function wirePicker(){
+  wireByPos();
   renderActive();
 
   el("view-seg").onclick = e => {
     const b = e.target.closest("button[data-view]"); if (!b || b.disabled) return;
     const u = loadUI(); u.view = b.dataset.view; saveUI(u); renderActive();
+  };
+  el("hors").onclick = e => {
+    const b = e.target.closest("button[data-h]"); if (!b || b.disabled) return;
+    const u = loadUI(); u.horizon = b.dataset.h; saveUI(u); bp.sortH = null; renderActive();
   };
   el("forms").onclick = e => {
     const b = e.target.closest("button[data-f]"); if (!b || b.disabled) return;
@@ -1044,8 +1198,8 @@ function wirePicker(){
   };
   el("btn-pick").onclick = () => { const s = loadState(); openEditor(s ? s.squad : [], s ? s.bank : BANK0, s ? s.ft : FT0); };
   el("btn-adopt").onclick = () => {
-    const u = loadUI(), k = MODEL_SQUADS[u.formation] ? u.formation : "auto", s = loadState();
-    openEditor(MODEL_SQUADS[k].squad, MODEL_SQUADS[k].bank, s ? s.ft : FT0);
+    const u = loadUI(), sq = modelSquads(u.horizon), k = sq[u.formation] ? u.formation : "auto", s = loadState();
+    openEditor(sq[k].squad, sq[k].bank, s ? s.ft : FT0);
   };
   el("btn-clear").onclick = () => { clearState(); const u = loadUI(); u.view = "model"; saveUI(u); location.reload(); };
   el("ed-cancel").onclick = () => { el("editor").hidden = true; };
@@ -1115,7 +1269,7 @@ def build_dashboard(context: dict) -> str:
          "best XI each week, captain included", False),
     ]
     tiles_html = "".join(
-        f'<div class="tile"><div class="k">{_esc(k)}</div>'
+        f'<div class="tile"><div class="k" id="{tid}-k">{_esc(k)}</div>'
         f'<div class="v{" sm" if small else ""}" id="{tid}">{v}'
         f'{f"<span class=unit> {u}</span>" if u else ""}'
         f'</div><div class="n" id="{tid}-n">{_esc(n)}</div></div>'
@@ -1162,6 +1316,11 @@ def build_dashboard(context: dict) -> str:
       <button class="btn primary" id="btn-pick">Pick my squad</button>
       <button class="btn" id="btn-clear" title="Forget the squad saved in this browser">Clear</button>
     </div>
+    <div class="formbar">
+      <span class="formbar-k">Plan for</span>
+      <div class="forms hors" id="hors" role="group" aria-label="Planning horizon"></div>
+    </div>
+    <p class="hint" id="hor-hint" style="margin-top:-4px"></p>
     <div class="formbar">
       <span class="formbar-k">Formation</span>
       <div class="forms" id="forms" role="group" aria-label="Formation"></div>
@@ -1218,11 +1377,38 @@ def build_dashboard(context: dict) -> str:
   </div>
 
   <div class="panel">
-    <h2>Highest projected points, next {horizon} gameweeks</h2>
+    <h2>Highest projected points, <span id="bars-h">next {horizon} gameweeks</span></h2>
     <p class="hint">Every player in the game, not just yours — and deliberately
       <b>not</b> capped at three per club, because this answers "who is worth
-      owning". The three-per-club rule applies to the squad above.</p>
-    {_bars(m['rankings'])}
+      owning". The three-per-club rule applies to the squad above. Follows
+      <b>Plan for</b>.</p>
+    <div id="bars">{_bars(m['rankings'])}</div>
+  </div>
+
+  <div class="panel" id="bypos-panel">
+    <h2>Expected points by position</h2>
+    <p class="hint">Every player, best first. Each column adds up the projected
+      points for that many gameweeks, starting with this one (no captaincy).
+      The highlighted column follows <b>Plan for</b> above; click any column
+      heading to sort by it instead. Under each name: club, price and the
+      minutes the model expects per game. <span class="mini" id="bp-count"></span></p>
+    <div class="controls">
+      <div class="seg" id="bp-pos" role="group" aria-label="Position">
+        <button data-pos="GK" aria-pressed="true" title="Goalkeepers">GK</button>
+        <button data-pos="DEF" aria-pressed="false" title="Defenders">DEF</button>
+        <button data-pos="MID" aria-pressed="false" title="Midfielders">MID</button>
+        <button data-pos="FWD" aria-pressed="false" title="Forwards">FWD</button>
+      </div>
+      <input id="bp-q" placeholder="Search player or club" style="min-width:170px"
+             aria-label="Search player or club">
+      <input id="bp-maxp" type="number" step="0.1" value="15" style="width:80px"
+             aria-label="Maximum price in millions" title="Maximum price">
+      <span class="mini">max £m</span>
+      <label class="mini chk"><input type="checkbox" id="bp-starters"> likely starters only</label>
+    </div>
+    <div class="tblwrap"><table class="bypos"><thead><tr id="bp-head"></tr></thead>
+      <tbody id="bp-body"></tbody></table></div>
+    <div class="bp-more"><button class="btn" id="bp-more" hidden></button></div>
   </div>
 
   {_scorecard(m.get('scorecard'), gw)}
@@ -1241,8 +1427,9 @@ def build_dashboard(context: dict) -> str:
   <div class="panel">
     <h2>Transfer suggestions</h2>
     <p class="hint">Gain is the extra points your <b>starting XI</b> is projected
-      to score across the horizon, so upgrading someone who never starts scores
-      near zero. Any points hit is already subtracted.</p>
+      to score over <b id="tr-h">the next {horizon} gameweeks</b> (set by
+      <b>Plan for</b>), so upgrading someone who never starts scores near zero.
+      Any points hit is already subtracted.</p>
     <div class="tblwrap"><table><thead><tr>
       <th class="num">Moves</th><th>Out</th><th>In</th>
       <th class="num">Bank</th><th class="num">Gain</th><th class="num">Verdict</th>
@@ -1259,7 +1446,7 @@ def build_dashboard(context: dict) -> str:
     <div class="controls">
       <input id="q" placeholder="Search player or club" style="min-width:190px"
              aria-label="Search player or club">
-      <div class="seg" role="group" aria-label="Filter by position">
+      <div class="seg" id="rk-pos" role="group" aria-label="Filter by position">
         <button data-pos="ALL" aria-pressed="true">All</button>
         <button data-pos="GK" aria-pressed="false">GK</button>
         <button data-pos="DEF" aria-pressed="false">DEF</button>
@@ -1280,7 +1467,7 @@ def build_dashboard(context: dict) -> str:
       <th data-k="team_short">Club</th>
       <th class="num" data-k="price">£m</th>
       <th class="num" data-k="ep_next">GW{gw}</th>
-      <th class="num" data-k="ep_horizon">Next {horizon}</th>
+      <th class="num" data-k="ep_horizon" id="th-hor">Next {horizon}</th>
       <th class="num" data-k="value">Pts/£m</th>
       <th class="num" data-k="xmins">xMins</th>
       <th class="num" data-k="curr_minutes">Mins</th>
@@ -1304,6 +1491,7 @@ def build_dashboard(context: dict) -> str:
             .replace('__GWS__', _json(m.get('gws', [])))
             .replace('__INITIAL_SQUAD__', _json(m.get('initial_squad', [])))
             .replace('__MODEL_SQUADS__', _json(m.get('model_squads', {})))
+            .replace('__HORIZON0__', json.dumps(int(m.get('horizon_default', horizon) or horizon)))
             .replace('__BANK0__', json.dumps(float(m.get('bank_initial', 0) or 0)))
             .replace('__FT0__', json.dumps(int(m.get('free_transfers_initial', 1) or 1)))
             .replace('__FORMATION0__', _esc(m.get('formation', 'auto')))

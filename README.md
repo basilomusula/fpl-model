@@ -160,6 +160,34 @@ next match, using only earlier results — using both difficulty ratings plus
 team form lifts the correlation with what happened from 0.37 to 0.45 over
 2024-25 and 2025-26, and improves the clean-sheet forecasts too.
 
+## Planning horizon: this week, or the next five
+
+The **Plan for** strip above the formation buttons sets how far ahead the
+squad is planned — **this gameweek** only, or the next **2, 3, 4 or 5**:
+
+* **Best £100m squad** switches to the squad built for that window. A
+  one-week squad chases this weekend's fixtures; a five-week squad gives a
+  little of that up for the run ahead. The hint underneath names the
+  players that differ, which is the quickest way to tell a one-week punt
+  from a long-term hold. Each button shows that squad's average projected
+  points a week.
+* **My squad**: transfer suggestions and the projected total are judged
+  over the chosen window, so "who should I bring in for this week only?"
+  and "who is worth holding for five?" are one click apart.
+* The **highest projected points** chart follows the same choice.
+
+The starting XI, captain and bench always show the coming gameweek — that
+is the team you are actually setting. On the command line the same
+comparison is printed as *best squad by planning horizon*.
+
+## Expected points by position
+
+Every player in the game, one position at a time, best first, with five
+columns: this gameweek and the next 2, 3, 4 and 5 added up. The column
+matching **Plan for** is highlighted and sorted on; click any other column
+to sort by it. Search, a price cap and a "likely starters only" filter
+(60+ expected minutes) narrow it down.
+
 ## Choosing a formation
 
 By default the XI takes whichever legal shape projects best that week
