@@ -12,10 +12,12 @@ import pandas as pd
 
 from .api import FPLClient, FPLError
 from .dashboard import build_dashboard
-from .features import Season, build_fixtures, build_players, build_teams, parse_events
+from .features import (DEFAULT_PARAMS, Season, build_fixtures, build_players, build_teams,
+                       parse_events)
 from .optimiser import (FORMATIONS, best_xi_for_gw, fmt_formation, optimise_squad,
                         parse_formation, squad_horizon_points, suggest_transfers)
 from .projection import gw_matrix, project
+from .teamform import apply_team_form
 
 BAR = "─" * 72
 
@@ -41,9 +43,6 @@ def load_season(args) -> Season:
     if args.gw:
         next_gw = args.gw
 
-    teams = build_teams(boot)
-    fixtures = build_fixtures(fixtures_json, teams, next_gw, args.horizon)
-
     summaries: dict[int, dict] = {}
     if not args.no_history:
         ids = [int(e["id"]) for e in boot["elements"]]
@@ -52,6 +51,17 @@ def load_season(args) -> Season:
             ids = el.nlargest(args.top_only, "now_cost").id.astype(int).tolist()
         summaries = client.element_summaries(ids)
         say(f"  loaded history for {len(summaries)} players")
+
+    params = DEFAULT_PARAMS
+    prior = build_teams(boot)
+    teams = apply_team_form(prior, fixtures_json, summaries, next_gw, params)
+    if teams.attrs.get("form_games"):
+        say(f"  team form: {teams.attrs['form_games']} matches played"
+            + (" (expected goals + goals)" if teams.attrs.get("form_uses_xg") else " (goals)")
+            + ("" if params.team_form else " - shown, not used in projections"))
+    fixtures = build_fixtures(fixtures_json, teams, next_gw, args.horizon,
+                              params=params,
+                              ref_teams=prior if params.form_own else None)
 
     players = build_players(boot, summaries, teams, gws_played)
 
@@ -73,7 +83,9 @@ def load_season(args) -> Season:
                   meta={"deadline": deadline, "deadline_iso": deadline_iso,
                         "client": client, "strength_source": source,
                         "bootstrap": boot, "fixtures_json": fixtures_json,
-                        "summaries": summaries})
+                        "summaries": summaries,
+                        "form_table": teams.attrs.get("form_table", []),
+                        "form_uses_xg": teams.attrs.get("form_uses_xg", False)})
 
 
 def resolve_players(tokens: list, summary: pd.DataFrame) -> list[int]:
@@ -530,6 +542,9 @@ def main(argv=None) -> int:
             "squad_horizon": horizon_pts,
             "transfers": transfers,
             "ticker": build_ticker(season, gws),
+            "form": {"rows": season.meta.get("form_table", []),
+                     "uses_xg": season.meta.get("form_uses_xg", False),
+                     "used": DEFAULT_PARAMS.team_form},
             "gws": [int(g) for g in gws],
             "initial_squad": squad_ids if mine else [],
             "model_squad": model_squads["auto"]["squad"],

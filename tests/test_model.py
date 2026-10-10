@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import copy
 import sys
 
 import numpy as np
@@ -14,13 +15,14 @@ import pandas as pd
 sys.path.insert(0, ".")
 
 from fpl_model.api import FPLClient                                   # noqa: E402
-from fpl_model.features import (Season, build_fixtures, build_players,  # noqa: E402
-                                build_teams, expected_conceded_penalty,
-                                parse_events)
+from fpl_model.features import (DEFAULT_PARAMS, Season, build_fixtures,  # noqa: E402
+                                build_players, build_teams,
+                                expected_conceded_penalty, parse_events)
 from fpl_model.optimiser import (FORMATIONS, SQUAD_LIMITS, best_xi_for_gw,  # noqa: E402
                                  optimise_squad, squad_horizon_points,
                                  suggest_transfers)
 from fpl_model.projection import gw_matrix, project                   # noqa: E402
+from fpl_model.teamform import apply_team_form                         # noqa: E402
 
 PASS, FAIL = 0, 0
 
@@ -327,7 +329,8 @@ def main(cache: str) -> int:
         untuned = ModelParams(shrink_k=8.0, recent_weight=0.0, form_window=4,
                               att_elasticity=0.9, cs_elasticity=1.0, xg_weight=0.0,
                               gk_capacity=False, fixture_ref="league",
-                              pos_scale=(1.0, 1.0, 1.0, 1.0))
+                              pos_scale=(1.0, 1.0, 1.0, 1.0), fdr_model="own",
+                              team_form=False, fdr_blend=0.3)
         s0 = summarise(run_backtest(log, params=untuned))
         check("tuned defaults outscore the original settings",
               s["xi_model_mean"] >= s0["xi_model_mean"] - 1e-9,
@@ -352,14 +355,87 @@ def main(cache: str) -> int:
         check("top-end defenders are not over-projected",
               len(dtop) == 0 or dtop.actual.mean() >= 0.9 * dtop.ep_next.mean(),
               f"delivered {dtop.actual.mean() / max(dtop.ep_next.mean(), 1e-9):.2f}")
+        gtop = top[top.pos == "GK"]
+        check("top-end keepers are not over-projected",
+              len(gtop) == 0 or gtop.actual.mean() >= 0.85 * gtop.ep_next.mean(),
+              f"delivered {gtop.actual.mean() / max(gtop.ep_next.mean(), 1e-9):.2f}")
+
+        # The same replay with only an overall rating per club, which is
+        # what FPL publishes before it sets the full ratings (and all it had
+        # published by GW6 of 2026-27). That is the mode the live model ran
+        # in when it put Raya in the armband.
+        coarse = copy.copy(log)
+        coarse.teams = copy.deepcopy(log.teams)
+        for t in coarse.teams:
+            for c in ("strength_attack_home", "strength_attack_away",
+                      "strength_defence_home", "strength_defence_away"):
+                t[c] = 0
+            t["strength_overall_home"] = t["strength_overall_away"] = t["strength"]
+        caps_c = {}
+        for g_ in [x for x in coarse.rounds if x >= 2]:
+            _, d_ = evaluate_gameweek(coarse, g_)
+            c_ = d_.loc[d_.ep_next.idxmax(), "pos"]
+            caps_c[c_] = caps_c.get(c_, 0) + 1
+        check("overall ratings only: a keeper is captain at most once a season",
+              caps_c.get("GK", 0) <= 1, str(caps_c))
+
+        # Team form and the two-sided difficulty model, scored where they act:
+        # predicting each club's expected goals in its next match, using only
+        # results from before that gameweek.
+        print("\nteam form and fixture difficulty")
+        from fpl_model.teamform import form_ratings, match_log
+        b20, s20, f20, _ = log.as_of(20)
+        check("no result from the target gameweek or later is visible",
+              all(f["team_h_score"] is None for f in f20 if (f.get("event") or 0) >= 20))
+        ml20 = match_log(f20, s20)
+        check("one row per club per finished match",
+              len(ml20) == 2 * sum(1 for f in f20 if f["finished"]), str(len(ml20)))
+        check("expected goals come through from player histories",
+              bool(ml20.xgf.notna().all()))
+        pr20 = build_teams(b20)
+        fr20 = form_ratings(ml20, pr20, 20, DEFAULT_PARAMS)
+        att20 = np.sqrt(fr20.att_home * fr20.att_away)
+        check("form ratings stay centred on league average",
+              abs(float(np.exp(np.log(att20).mean())) - 1) < 0.05,
+              f"{float(np.exp(np.log(att20).mean())):.3f}")
+        best_xg = ml20.groupby("team").xgf.mean().idxmax()
+        check("the club creating most chances is rated an above-average attack",
+              float(att20.loc[best_xg]) > 1.0, f"{float(att20.loc[best_xg]):.2f}")
+        empty = form_ratings(ml20.iloc[0:0], pr20, 20, DEFAULT_PARAMS)
+        check("with no results, form ratings are FPL's own",
+              bool(np.allclose(empty.att_home, pr20.att_home)))
+
+        def fixture_accuracy(params):
+            err, n = 0.0, 0
+            for g_ in range(6, 38, 3):
+                bo, su, fx_, _ = log.as_of(g_)
+                pr_ = build_teams(bo)
+                tm_ = apply_team_form(pr_, fx_, su, g_, params)
+                pred = build_fixtures(fx_, tm_, g_, 1, params=params)
+                nxt = match_log([dict(f, finished=True) for f in log.fixtures
+                                 if f.get("event") == g_], None)
+                if nxt.empty:
+                    continue
+                xg_ = {}
+                for _, r_ in log.rows[log.rows["round"] == g_].iterrows():
+                    k_ = (int(r_.fixture), bool(r_.was_home))
+                    xg_[k_] = xg_.get(k_, 0.0) + float(r_.expected_goals)
+                for r_ in pred.itertuples():
+                    k_ = (int(r_.fixture_id), bool(r_.is_home))
+                    if k_ in xg_:
+                        err += (r_.xg_for - xg_[k_]) ** 2
+                        n += 1
+            return err / max(n, 1)
+        old_fx = DEFAULT_PARAMS.replace(fdr_model="own", team_form=False, fdr_blend=0.3)
+        e_new, e_old = fixture_accuracy(DEFAULT_PARAMS), fixture_accuracy(old_fx)
+        check("published difficulty (both sides) + team form predict match xG better",
+              e_new < e_old, f"squared error {e_new:.3f} vs {e_old:.3f}")
 
     print("\ndegraded team strength ratings")
     # Regression: FPL ships the attack/defence ratings as zeros until it has
     # set the season's numbers. Dividing by that produced NaN everywhere,
     # every projection tied at zero, and the ranking fell back to the API's
     # own club-by-club ordering - which read as "the model only likes Arsenal".
-    import copy
-
     from fpl_model.features import build_teams as _bt
 
     zeroed = copy.deepcopy(boot)
@@ -383,6 +459,14 @@ def main(cache: str) -> int:
         check(f"{label}: expected goals stay valid",
               bool(fxd.xg_for.notna().all() and fxd.xg_for.between(0.3, 3.7).all()),
               f"{fxd.xg_for.min():.2f}-{fxd.xg_for.max():.2f}")
+        # Regression: the reference fixture once assumed difficulty 3, but a
+        # top club's opponents always face a 4 or 5, so its clean-sheet odds
+        # were boosted in every single game - which is how Raya ended up
+        # captain. Over a whole season the multipliers must now average out.
+        full = build_fixtures(fxj, tm, 1, 38)
+        drift = (full.p_clean_sheet / full.ref_p_clean_sheet).groupby(full.team).mean()
+        check(f"{label}: clean-sheet boost averages out over a club's season",
+              bool((drift - 1).abs().max() < 0.03), f"worst {drift.max():.3f}")
         s2 = Season(players=players, teams=tm.reset_index(), fixtures=fxd,
                     events=events, next_gw=next_gw, current_gw=current_gw,
                     gws_played=played)

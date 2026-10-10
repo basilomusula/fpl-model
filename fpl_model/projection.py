@@ -57,7 +57,7 @@ def project(season: Season, horizon: int = 5,
     league_pcs = float(fixtures.p_clean_sheet.mean())
 
     fx = fixtures.copy()
-    if params.fixture_ref == "team" and "ref_xg_for" in fx.columns:
+    if params.fixture_ref in ("team", "schedule") and "ref_xg_for" in fx.columns:
         # Relative to the club's own typical fixture (see build_fixtures).
         ref_xg, ref_pcs = fx.ref_xg_for, fx.ref_p_clean_sheet
         ref_pen = fx.ref_xg_against.map(expected_conceded_penalty)

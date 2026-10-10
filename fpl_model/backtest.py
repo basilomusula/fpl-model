@@ -35,6 +35,7 @@ from .features import (DEFAULT_PARAMS, ModelParams, Season, build_fixtures,
                        build_players, build_teams)
 from .optimiser import best_xi_for_gw
 from .projection import project
+from .teamform import apply_team_form
 
 POS_CODE = {"GK": 1, "DEF": 2, "MID": 3, "FWD": 4}
 POS_NAME = {v: k for k, v in POS_CODE.items()}
@@ -66,7 +67,7 @@ class GameweekLog:
         # adding, so every numeric field is coerced here, once, for both the
         # CSV and the API constructors.
         rows = self.rows.copy()
-        for col in SUM_FIELDS + ["value", "round", "xP", "opponent_team"]:
+        for col in SUM_FIELDS + ["value", "round", "xP", "opponent_team", "fixture"]:
             if col in rows.columns:
                 rows[col] = pd.to_numeric(rows[col], errors="coerce")
         for col in SUM_FIELDS:
@@ -132,7 +133,7 @@ class GameweekLog:
         recs = []
         for pid, s in summaries.items():
             for h in s.get("history", []) or []:
-                row = {k: h.get(k) for k in SUM_FIELDS + ["value", "was_home",
+                row = {k: h.get(k) for k in SUM_FIELDS + ["value", "was_home", "fixture",
                                                          "opponent_team", "kickoff_time"]}
                 row["id"] = int(pid)
                 row["round"] = h.get("round")
@@ -192,7 +193,7 @@ class GameweekLog:
                                        for v, k in POS_CODE.items()]}
 
         summaries: dict[int, dict] = {}
-        hist_cols = ["id", "round", "kickoff_time", "value", "was_home",
+        hist_cols = ["id", "round", "fixture", "kickoff_time", "value", "was_home",
                      "opponent_team"] + SUM_FIELDS
         hist_rows = (before[[c for c in hist_cols if c in before.columns]]
                      .to_dict("records"))
@@ -210,6 +211,10 @@ class GameweekLog:
             f2 = dict(f)
             ev = f2.get("event")
             f2["finished"] = bool(ev is not None and ev < gw)
+            if not f2["finished"]:
+                # The CSVs carry every final score; before the deadline
+                # nobody knew them.
+                f2["team_h_score"] = f2["team_a_score"] = None
             fixtures.append(f2)
 
         actuals = (this.groupby("id").agg(actual=("total_points", "sum"),
@@ -269,8 +274,10 @@ def evaluate_gameweek(log: GameweekLog, gw: int,
                       params: ModelParams = DEFAULT_PARAMS) -> tuple[dict, pd.DataFrame]:
     """Project GW `gw` using only earlier data; score against actuals."""
     bootstrap, summaries, fixtures, actuals = log.as_of(gw)
-    teams = build_teams(bootstrap)
-    fx = build_fixtures(fixtures, teams, gw, 1, params=params)
+    prior = build_teams(bootstrap)
+    teams = apply_team_form(prior, fixtures, summaries, gw, params)
+    fx = build_fixtures(fixtures, teams, gw, 1, params=params,
+                        ref_teams=prior if params.form_own else None)
     if fx.empty:
         return {"gw": gw, "n": 0}, pd.DataFrame()
     players = build_players(bootstrap, summaries, teams, gw - 1, params=params)

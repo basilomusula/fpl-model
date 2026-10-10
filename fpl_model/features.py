@@ -3,9 +3,10 @@
 Two things happen here:
 
 1. Every upcoming fixture is converted into a pair of expected-goals numbers
-   (how many the home side should score, how many the away side should) using
-   FPL's published team strength ratings, a home-advantage term, and the
-   official fixture difficulty rating as a sanity blend.
+   (how many the home side should score, how many the away side should) by
+   blending two views: team ratings (FPL's strengths, updated with this
+   season's results - see teamform.py) and FPL's published fixture
+   difficulty ratings for both sides of the fixture.
 2. Every player is reduced to a per-90 scoring rate plus a breakdown of where
    those points come from (attacking / clean sheets / everything else), which
    is what lets the model react to fixtures differently by position.
@@ -27,8 +28,19 @@ import pandas as pd
 BASE_HOME_GOALS = 1.55      # league-average goals for a home side
 BASE_AWAY_GOALS = 1.25      # league-average goals for an away side
 STRENGTH_EXPONENT = 1.00    # how hard team strength ratings bite
-FDR_BLEND = 0.30            # weight on FPL's own 1-5 difficulty vs strengths
+FDR_BLEND = 0.60            # weight on FPL's own 1-5 difficulty vs team ratings
 XG_FLOOR, XG_CEIL = 0.35, 3.6
+
+# FPL's published difficulty ratings as expected goals. Every fixture has two
+# ratings: the one shown for a side's own fixture (how strong the opponent is)
+# and the one shown for the opponent (how strong this side is). A side's
+# expected goals depend on both. These multipliers are a Poisson fit of team
+# xG on the two ratings over all 760 team-matches of 2024-25 (re-fitted on
+# 2025-26 they barely move). The ratings already include venue - an away
+# trip is rated harder - so the home term is small.
+FDR_OWN = {1: 1.40, 2: 1.17, 3: 1.00, 4: 0.83, 5: 0.68}   # this side's rating
+FDR_OPP = {1: 0.60, 2: 0.80, 3: 1.00, 4: 1.14, 5: 1.27}   # the opponent's rating
+FDR_BASE_HOME, FDR_BASE_AWAY = 1.44, 1.40
 
 POS_NAME = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 GOAL_POINTS = {"GK": 10, "DEF": 6, "MID": 5, "FWD": 4}
@@ -68,13 +80,22 @@ class ModelParams:
     minutes_exponent: float = 1.25   # (xmins/90) ** this scales points
     fdr_blend: float | None = None   # None: chosen from strength-rating quality
     att_elasticity: float = 1.20     # attacking returns vs team expected goals
-    cs_elasticity: float = 1.30      # clean-sheet points vs shutout probability
+    cs_elasticity: float = 1.50      # clean-sheet points vs shutout probability
     season_weights: tuple = (1.0, 0.5, 0.2)  # prior seasons, most recent first
     xg_weight: float = 0.25          # 0: actual goals/assists; 1: expected ones
     gk_capacity: bool = True         # a club fields one keeper: share his minutes
-    fixture_ref: str = "team"        # fixtures judged vs "league" average or the
-                                     # "team"'s own typical fixture (no double count)
-    pos_scale: tuple = (1.0, 0.8, 1.0, 1.0)  # GK, DEF, MID, FWD calibration
+    fixture_ref: str = "schedule"    # fixtures judged vs the "league" average, an
+                                     # average opponent ("team"), or the club's own
+                                     # full-season "schedule" (no double count)
+    pos_scale: tuple = (0.85, 0.8, 1.0, 1.0)  # GK, DEF, MID, FWD calibration
+    fdr_model: str = "both"          # "own": a side's rating moves its attack only;
+                                     # "both": both published ratings move both ends
+    team_form: bool = True           # rate clubs on this season's results too
+    form_k: float = 8.0              # games of prior evidence form is shrunk toward
+    form_half_life: float = 10.0     # gameweeks for a result's weight to halve
+    form_xg_weight: float = 0.85     # 0: actual goals only; 1: expected goals only
+    form_venue_k: float = 10.0       # games of evidence before home/away splits count
+    form_own: bool = False           # let a club's own form move its players too
 
     def replace(self, **kw) -> "ModelParams":
         from dataclasses import replace as _r
@@ -160,17 +181,18 @@ def build_teams(bootstrap: dict) -> pd.DataFrame:
         teams["def_away"] = _relative(teams.strength_defence_away)
     elif have_overall:
         # Pre-season FPL often publishes only an overall rating. A stronger
-        # side both scores more and concedes less, so it drives both axes -
-        # but it is coarser, so we lean harder on the difficulty ratings.
-        source, fdr_blend = "overall rating only", 0.50
+        # side both scores more and concedes less, so it drives both axes.
+        # Team form (teamform.py) then sharpens it as results come in.
+        source, fdr_blend = "overall rating only", FDR_BLEND
         home = _relative(teams.strength_overall_home)
         away = _relative(teams.strength_overall_away)
         teams["att_home"], teams["def_home"] = home, home
         teams["att_away"], teams["def_away"] = away, away
     else:
-        # Nothing usable. Fall back entirely on FPL's fixture difficulty,
-        # which is populated well before the strength ratings are.
-        source, fdr_blend = "fixture difficulty only", 1.00
+        # Nothing usable. Lean on FPL's fixture difficulty, which is
+        # populated well before the strength ratings are; the flat ratings
+        # left here only carry information once team form fills them in.
+        source, fdr_blend = "fixture difficulty only", 0.80
         for col in ("att_home", "att_away", "def_home", "def_away"):
             teams[col] = 1.0
 
@@ -191,13 +213,43 @@ def _fdr_multiplier(fdr: float) -> float:
     return float({1: 1.30, 2: 1.15, 3: 1.00, 4: 0.86, 5: 0.72}.get(int(fdr), 1.0))
 
 
+def _fixture_xg(th: pd.Series, ta: pd.Series, fdr_h: int, fdr_a: int,
+                fdr_blend: float, fdr_model: str) -> tuple[float, float]:
+    """Expected goals (home, away) for one fixture.
+
+    A blend of two views: the team ratings (FPL's strengths, updated with
+    this season's form when that is switched on) and FPL's own published
+    difficulty ratings.
+    """
+    xg_h = _xg_pair(th.att_home, ta.def_away, BASE_HOME_GOALS)
+    xg_a = _xg_pair(ta.att_away, th.def_home, BASE_AWAY_GOALS)
+    if fdr_model == "both":
+        # Each side's rating says how strong its opponent is, so both
+        # ratings bear on both sides' goals: the one on a side's own fixture
+        # (who it faces) and the one shown to its opponent (how strong it is).
+        f_h = FDR_BASE_HOME * FDR_OWN.get(int(fdr_h), 1.0) * FDR_OPP.get(int(fdr_a), 1.0)
+        f_a = FDR_BASE_AWAY * FDR_OWN.get(int(fdr_a), 1.0) * FDR_OPP.get(int(fdr_h), 1.0)
+    else:
+        f_h = BASE_HOME_GOALS * _fdr_multiplier(fdr_h)
+        f_a = BASE_AWAY_GOALS * _fdr_multiplier(fdr_a)
+    return (xg_h * (1 - fdr_blend) + f_h * fdr_blend,
+            xg_a * (1 - fdr_blend) + f_a * fdr_blend)
+
+
 def build_fixtures(fixtures_json: list[dict], teams: pd.DataFrame,
                    next_gw: int, horizon: int,
-                   params: ModelParams = DEFAULT_PARAMS) -> pd.DataFrame:
-    """One row per team per upcoming fixture, with expected goals both ways."""
+                   params: ModelParams = DEFAULT_PARAMS,
+                   ref_teams: pd.DataFrame | None = None) -> pd.DataFrame:
+    """One row per team per upcoming fixture, with expected goals both ways.
+
+    `ref_teams`, when given, is used for each club's typical fixture instead
+    of `teams` - that is how a club's own form reaches its own players (see
+    ModelParams.form_own).
+    """
     fdr_blend = float(teams.attrs.get("fdr_blend", FDR_BLEND))
     if params.fdr_blend is not None:
         fdr_blend = float(np.clip(params.fdr_blend, 0.0, 1.0))
+    model = params.fdr_model
     rows = []
     last_gw = next_gw + horizon - 1
     for fx in fixtures_json:
@@ -207,17 +259,10 @@ def build_fixtures(fixtures_json: list[dict], teams: pd.DataFrame,
         h, a = fx["team_h"], fx["team_a"]
         if h not in teams.index or a not in teams.index:
             continue
-        th, ta = teams.loc[h], teams.loc[a]
-
-        xg_h = _xg_pair(th.att_home, ta.def_away, BASE_HOME_GOALS)
-        xg_a = _xg_pair(ta.att_away, th.def_home, BASE_AWAY_GOALS)
-
-        # Blend in FPL's own difficulty rating so we are not fully hostage to
-        # strength ratings that can be stale in pre-season.
         fdr_h = fx.get("team_h_difficulty") or 3
         fdr_a = fx.get("team_a_difficulty") or 3
-        xg_h = xg_h * (1 - fdr_blend) + BASE_HOME_GOALS * _fdr_multiplier(fdr_h) * fdr_blend
-        xg_a = xg_a * (1 - fdr_blend) + BASE_AWAY_GOALS * _fdr_multiplier(fdr_a) * fdr_blend
+        xg_h, xg_a = _fixture_xg(teams.loc[h], teams.loc[a], fdr_h, fdr_a,
+                                 fdr_blend, model)
 
         for team_id, opp_id, home, xg_for, xg_against, fdr in (
             (h, a, True, xg_h, xg_a, fdr_h),
@@ -243,17 +288,42 @@ def build_fixtures(fixtures_json: list[dict], teams: pd.DataFrame,
     fixtures["p_clean_sheet"] = np.exp(-fixtures.xg_against)
     fixtures["opp_short"] = fixtures.opponent.map(teams.short_name)
 
-    # Each club's typical fixture: the same model against an average opponent,
-    # once at home and once away. A player's base rate was earned against a
-    # mix of opponents, so it already contains his own club's strength; the
+    # Each club's typical fixture. By default that is its whole season's
+    # schedule; the older "team" setting uses an average opponent once at
+    # home and once away. A player's base rate was earned against a mix of
+    # opponents, so it already contains his own club's strength; the
     # fixture adjustment should measure only how this opponent and venue
     # differ from that mix. Comparing against the league average instead
     # counts club strength twice - most of all for defenders, because
     # clean-sheet odds rise steeply as a defence improves.
+    rt = teams if ref_teams is None else ref_teams
+    ref = {}
+    if params.fixture_ref == "schedule":
+        # The club's whole season, played and unplayed, run through exactly
+        # the same formulas. An "average opponent" is not enough on its own:
+        # FPL's difficulty ratings are themselves set from club strength, so
+        # a top side's opponents always face a 4 or 5 - which, blended in,
+        # quietly boosts that side's clean-sheet odds in every fixture.
+        acc: dict[int, list] = {}
+        for f in fixtures_json:
+            h, a = f.get("team_h"), f.get("team_a")
+            if f.get("event") is None or h not in rt.index or a not in rt.index:
+                continue
+            gh, ga = _fixture_xg(rt.loc[h], rt.loc[a],
+                                 f.get("team_h_difficulty") or 3,
+                                 f.get("team_a_difficulty") or 3, fdr_blend, model)
+            acc.setdefault(h, []).append((gh, ga))
+            acc.setdefault(a, []).append((ga, gh))
+        for tid, vals in acc.items():
+            v = np.asarray(vals)
+            ref[tid] = (float(v[:, 0].mean()), float(v[:, 1].mean()),
+                        float(np.exp(-v[:, 1]).mean()))
+
     def blend(model_xg, base):
         return model_xg * (1 - fdr_blend) + base * fdr_blend   # FDR 3 -> x1.0
-    ref = {}
-    for tid, tr in teams.iterrows():
+    for tid, tr in rt.iterrows():
+        if tid in ref:
+            continue
         for_h = blend(_xg_pair(tr.att_home, 1.0, BASE_HOME_GOALS), BASE_HOME_GOALS)
         for_a = blend(_xg_pair(tr.att_away, 1.0, BASE_AWAY_GOALS), BASE_AWAY_GOALS)
         ag_h = blend(_xg_pair(1.0, tr.def_home, BASE_AWAY_GOALS), BASE_AWAY_GOALS)

@@ -189,6 +189,63 @@ def _ticker(ticker: dict) -> str:
     </tr></thead><tbody>{"".join(body)}</tbody></table></div>"""
 
 
+def _form(form: dict | None) -> str:
+    """Team form: results, home and away records, and the fitted ratings."""
+    rows = (form or {}).get("rows") or []
+    if not rows:
+        return ""
+    xg = bool((form or {}).get("uses_xg"))
+
+    def rec(gf, ga, xgf, xga):
+        if gf is None:
+            return '<span class="dim">—</span>'
+        s = f"{_fmt(gf, 1)}–{_fmt(ga, 1)}"
+        if xg and xgf is not None:
+            s += f'<span class="dim tick-name"> xG {_fmt(xgf, 1)}–{_fmt(xga, 1)}</span>'
+        return s
+
+    def idx(v):
+        if v is None:
+            return '<span class="dim">—</span>'
+        n = round(100 * v)
+        band = 1 if n >= 120 else 2 if n >= 107 else 3 if n > 93 else 4 if n > 80 else 5
+        return f'<span class="chip f{band}">{n}</span>'
+
+    body = []
+    for r in rows:
+        last = "".join(
+            f'<span class="chip {"f1" if x == "W" else "f3" if x == "D" else "f5"} res">{x}</span>'
+            for x in r["last"])
+        body.append(f"""
+        <tr>
+          <td class="strong">{_esc(r['short'].upper())}</td>
+          <td class="tick">{last}</td>
+          <td class="num">{_fmt(r['ppg'], 2)}</td>
+          <td class="num rec">{rec(r['home_gf'], r['home_ga'], r['home_xgf'], r['home_xga'])}</td>
+          <td class="num rec">{rec(r['away_gf'], r['away_ga'], r['away_xgf'], r['away_xga'])}</td>
+          <td class="num">{idx(r['att'])}</td>
+          <td class="num">{idx(r['def'])}</td>
+        </tr>""")
+    used = (form or {}).get("used", False)
+    return f"""
+  <div class="panel">
+    <h2>Team form</h2>
+    <p class="hint">This season so far, most recent result on the right.
+      <b>Home</b> and <b>Away</b> are goals
+      scored–conceded per game{", with expected goals alongside" if xg else ""}.
+      <b>Attack</b> and <b>Defence</b> are the ratings the model fitted from
+      these results — 100 is league average, higher is better at both ends —
+      adjusted for who each club has played, weighted toward recent games, and
+      blended with FPL's own ratings while the sample is small.
+      {"They feed every fixture projection, alongside FPL's published difficulty ratings." if used else "Shown for reference; the projections are not using them."}</p>
+    <div class="tblwrap"><table class="ticker formtbl"><thead><tr>
+      <th>Club</th><th>Last 5</th><th class="num">Pts/game</th>
+      <th class="num">Home</th><th class="num">Away</th>
+      <th class="num">Attack</th><th class="num">Defence</th>
+    </tr></thead><tbody>{"".join(body)}</tbody></table></div>
+  </div>"""
+
+
 def _scorecard(sc: dict | None, horizon_gw: int) -> str:
     """How the model has actually done this season, gameweek by gameweek."""
     if not sc or not sc.get("rows"):
@@ -405,6 +462,8 @@ h2{font-size:15px;font-weight:640;letter-spacing:-.005em;margin:0 0 3px}
   line-height:1.3;white-space:nowrap;border:1px solid rgba(0,0,0,.10)}
 .chip i{font-style:normal;font-size:7.5px;font-weight:700;opacity:.85}
 .chip.away{letter-spacing:-.01em}
+.chip.res{min-width:16px;justify-content:center;margin-right:2px;font-weight:700}
+table.formtbl td.rec,table.formtbl td.tick{white-space:nowrap}
 .chip.f1{background:#d0edcf;color:#10120f}
 .chip.f2{background:#97d496;color:#10120f}
 .chip.f3{background:#a8a69f;color:#10120f}
@@ -1067,9 +1126,10 @@ def build_dashboard(context: dict) -> str:
     if source and source != "attack/defence split":
         notice = (f'<div class="notice"><b>◔</b><div><b>FPL has not published its '
                   f'full team strength ratings</b> ({_esc(source)}), so the model is '
-                  f'leaning on fixture difficulty instead. Replayed over a full past '
-                  f'season this costs about one point a week — informational, not a '
-                  f'fault. It clears itself when FPL publishes the ratings.</div></div>')
+                  f'rating clubs on FPL\'s fixture difficulty and this season\'s results '
+                  f'instead (see Team form). Replayed over a past season this costs '
+                  f'about half a point a week — informational, not a fault. It clears '
+                  f'itself when FPL publishes the ratings.</div></div>')
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1175,6 +1235,8 @@ def build_dashboard(context: dict) -> str:
       patch arrives.</p>
     {_ticker(m.get('ticker', {}))}
   </div>
+
+  {_form(m.get('form'))}
 
   <div class="panel">
     <h2>Transfer suggestions</h2>

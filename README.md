@@ -96,10 +96,20 @@ points have historically come from — **attacking returns**, **clean sheets**,
 and **everything else** (appearance points, defensive contributions, cards,
 saves). Only the first two respond to fixtures:
 
-* Each upcoming fixture is turned into a pair of expected-goals numbers from
-  FPL's published team attack and defence strengths, separately for home and
-  away, blended 70/30 with FPL's own 1–5 difficulty rating.
-* FPL does not publish those attack and defence ratings until a season is
+* Each upcoming fixture is turned into a pair of expected-goals numbers,
+  60% from **FPL's published fixture difficulty ratings** and 40% from
+  **team ratings** (FPL's strengths, updated with this season's results —
+  see *Team form* below).
+* Every fixture carries two difficulty ratings: the one shown on a side's
+  own fixture (how strong its opponent is) and the one shown to the
+  opponent (how strong the side itself is). A side's expected goals depend
+  on both, and its clean-sheet odds depend on its own fixture's rating —
+  that is the opponent's attack. How much each rating is worth in goals was
+  fitted on all 760 team-matches of 2024-25 and checked on 2025-26.
+* A fixture is always judged against the club's own season: a player's
+  base rate was earned against his club's mix of opponents, so only how
+  this fixture differs from that mix should move his number.
+* FPL does not publish its attack and defence ratings until a season is
   under way. When they are missing the model says so on startup and falls
   back — first to the overall team rating, then to fixture difficulty alone —
   rather than producing numbers from nothing.
@@ -120,6 +130,35 @@ baked into the baseline. The model never has to guess a coefficient for them.
 Points over the horizon are discounted 12% per gameweek, so a good fixture next
 week counts for more than a good fixture in five weeks' time. Double gameweeks
 are summed automatically and blanks simply contribute nothing.
+
+## Team form
+
+FPL's team ratings change slowly, and in some seasons are not published
+until well into the autumn. Results are the evidence they lag behind, so
+every club's attack and defence are also rated from this season's matches
+(`fpl_model/teamform.py`):
+
+* each match counts **expected goals** (85%) and actual goals (15%) both
+  ways — over a handful of games, xG says far more about a side than the
+  scoreline does;
+* adjusted for the opponent — three goals against the bottom side count
+  for less than three against the champions;
+* **recent matches count more**: a result's weight halves every ten
+  gameweeks;
+* **home and away** are tracked separately, on top of the league-wide home
+  advantage, and shrunk harder because each rests on half the games;
+* blended with FPL's own ratings as if FPL's view were worth eight
+  matches, so after two games the ratings have barely moved and by twenty
+  they are mostly results.
+
+The dashboard's **Team form** table shows each club's last five results,
+its home and away records (goals and xG per game) and the fitted attack and
+defence ratings, where 100 is league average.
+
+Scored on what it is for — predicting each club's expected goals in its
+next match, using only earlier results — using both difficulty ratings plus
+team form lifts the correlation with what happened from 0.37 to 0.45 over
+2024-25 and 2025-26, and improves the clean-sheet forecasts too.
 
 ## Choosing a formation
 
@@ -149,24 +188,42 @@ using only what was knowable before that deadline — the per-round log up to
 the previous week, the price at the time, the fixtures — and scored against
 what actually happened. Nothing from the future leaks in.
 
-Over the whole of 2025-26 (37 scorable gameweeks):
+Over the whole of 2025-26 (37 scorable gameweeks), with the team ratings
+FPL published:
 
 | | Model | Naive season-points pick | Best possible in hindsight |
 |---|---|---|---|
-| Actual points of the chosen XI, per week (captain doubled) | **61.9** | 50.9 | 155 |
-| Weeks the model's XI scored more | **29 of 37** | — | — |
-| Captain's actual points, per week | **7.4** | 5.7 | 17.4 |
+| Actual points of the chosen XI, per week (captain doubled) | **61.4** | 50.9 | 155 |
+| Weeks the model's XI scored more | **25 of 37** | — | — |
+| Captain's actual points, per week | **6.8** | 5.7 | 17.4 |
 | Rank correlation, projected vs actual | 0.43 | — | 1.00 |
 
-An edge of about eleven points a week over picking on season points,
-sustained across most weeks, and a captain worth nearly two points a week
-more than the obvious choice.
+An edge of about ten points a week over picking on season points,
+sustained across most weeks.
 
-### Three corrections the backtest found
+One catch: the ratings in that season's files are FPL's *final* ones, which
+already reflect how the season went. The live model never has those. So
+each change is also replayed the way the live model actually runs — with
+only the previous season's overall ratings, as FPL has published for
+2026-27 so far — and on a second season, 2024-25. Here is what the fixture
+changes (both difficulty ratings plus team form) are worth, in XI points
+per week:
+
+| Replay | Before | After |
+|---|---|---|
+| 2025-26, previous season's ratings (the live situation) | 58.8 | **60.8** |
+| 2024-25, previous season's ratings | 69.1 | **69.7** |
+| 2025-26, FPL's final ratings (hindsight) | 61.3 | 61.4 |
+| 2024-25, FPL's final ratings (hindsight) | 68.9 | 68.8 |
+
+They help where the live model needs help — when FPL's ratings are stale —
+and make no difference when the ratings already know the answer.
+
+### Corrections the backtest found
 
 The backtest showed systematic errors that a plain eye test would miss.
-Each fix below was chosen on the first half of the season and then checked
-on the second half, which it had not seen:
+The first three fixes below were chosen on the first half of the season and
+then checked on the second half, which they had not seen:
 
 * **One keeper per club.** Every keeper's chance of starting was estimated
   on its own, so a club's first and second choice could both look likely to
@@ -186,13 +243,34 @@ on the second half, which it had not seen:
 Together they added 1.3 points a week to the XI and 1.4 a week to the
 captain's score, and turned a +0.18 projection bias into −0.07.
 
+Two more came from the live model putting Raya in the armband in GW6 of
+2026-27, while FPL had published only an overall rating for each club:
+
+* **Difficulty ratings counted club strength again.** "A club's typical
+  fixture" was modelled as an average opponent at difficulty 3. But FPL
+  sets its difficulty ratings from club strength, so Arsenal's opponents
+  face a 4 or 5 in every game, and the blended-in rating boosted Arsenal's
+  clean-sheet odds every single week. The reference is now the club's
+  whole season, run through the same formulas, so the boost averages out.
+* **Keepers are marked down 15%.** Among the model's five highest
+  projections each week, keepers delivered 76% of what was projected,
+  against 104–112% for attackers. A keeper's projection can still be
+  right in absolute terms; the correction is about how keepers compare
+  with the players they compete with for the armband and the budget.
+
+Replayed with only overall ratings (the mode FPL is in now), these two
+added 0.7 points a week to the XI and took keeper captaincy to zero. With
+the fixture model since rebuilt around both difficulty ratings and team
+form (above), a keeper is captain once in the 37 weeks of 2025-26 — Raya,
+at home in GW37, who scored 6.
+
 The default settings in `ModelParams` are the ones the backtest found best.
 `tools/tune.py` re-runs the search for any season, which is worth doing each
 summer. The dashboard's **"How accurate has it been?"** panel runs the same
 replay on *this* season's completed gameweeks every time the page is built,
 so you can see for yourself rather than take my word for it.
 
-Caveats, honestly stated: one season is one sample, and the replay cannot
+Caveats, honestly stated: two seasons are still a small sample, and the replay cannot
 know who was ruled out on the Friday (the live model can), so it slightly
 understates the live model. It also cannot be compared fairly against FPL's
 own expected points, which in the public data turn out to be recorded late
@@ -303,10 +381,13 @@ CSV files of the right shape are published at
 * **Promoted clubs and new signings lean on the price prior**, which is a much
   blunter instrument than actual data. Treat August projections for those
   players as a starting point for your own judgement.
-* **Team strength ratings are FPL's own** and they update slowly. When they
-  are not published at all the model leans on fixture difficulty and says so
-  on the page. Measured on a full season, running without them costs about
-  one point a week — a small loss, not a broken model.
+* **Team strength ratings are FPL's own** and they update slowly, which is
+  why the model also rates clubs on their results (see *Team form*). When
+  FPL's ratings are not published at all the model leans on fixture
+  difficulty and form, and says so on the page. Replayed on 2025-26,
+  running on the previous season's overall ratings instead of the current
+  full ones costs about half a point a week — a small loss, not a broken
+  model.
 * **The rankings table is not club-capped, and shouldn't be.** It answers "who
   are the best players", not "who can I legally own". The three-per-club rule
   applies to the squad the optimiser builds, which is a different thing.
